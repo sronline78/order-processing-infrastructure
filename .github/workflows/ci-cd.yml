@@ -57,7 +57,7 @@ jobs:
         run: npm run lint
 
       - name: Run unit tests
-        run: npm test -- --coverage --ci --reporters=default --reporters=jest-junit
+        run: npm test -- --coverage --ci
 
       - name: Publish test results
         uses: EnricoMi/publish-unit-test-result-action@v2
