@@ -64,7 +64,7 @@ jobs:
         if: always()
         with:
           files: |
-            test-results.xml
+            **/test-results.xml
           check_name: CDK Unit Tests
 
       - name: Publish code coverage
@@ -224,10 +224,6 @@ jobs:
 
       - name: Deploy ApplicationStack
         run: npx cdk deploy dev-ApplicationStack --require-approval never
-
-      - name: Deploy MonitoringStack
-        run: npx cdk deploy dev-MonitoringStack --require-approval never
-        continue-on-error: true
 
       - name: Verify deployment
         id: get-alb-url
