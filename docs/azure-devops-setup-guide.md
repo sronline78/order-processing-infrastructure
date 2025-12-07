@@ -58,9 +58,56 @@ The existing `azure-pipelines.yml` already implements this correctly.
 Before starting, ensure you have:
 
 - Azure DevOps account (free at https://dev.azure.com)
-- Valid AWS account and credentials 
+- AWS account with appropriate permissions
+- AWS credentials (Access Key ID and Secret Access Key)
+  - **Recommended:** Create a dedicated IAM user for CI/CD deployments (see [IAM User Setup](#iam-user-setup) below)
+  - **Required permissions:** CloudFormation, EC2, ECS, RDS, Lambda, SQS, ECR, S3, IAM (role creation)
 - Repository hosted on Azure Repos or GitHub
 - Administrator access to Azure DevOps organization
+
+---
+
+## IAM User Setup
+
+### Create Dedicated Deployment User (Recommended)
+
+For security best practices, create a dedicated IAM user for Azure DevOps deployments instead of using your main AWS credentials.
+
+**Quick Setup:**
+
+```bash
+# Create IAM user
+aws iam create-user --user-name azure-devops-deployer
+
+# Attach PowerUserAccess policy (allows full AWS service access except IAM user management)
+aws iam attach-user-policy \
+  --user-name azure-devops-deployer \
+  --policy-arn arn:aws:iam::aws:policy/PowerUserAccess
+
+# Create access keys
+aws iam create-access-key --user-name azure-devops-deployer
+```
+
+**Save the Access Key ID and Secret Access Key** - you'll use these in Azure DevOps service connections.
+
+### Required IAM Permissions
+
+The deployment user needs permissions for:
+- **CloudFormation** - Stack creation and management
+- **ECR** - Docker image storage
+- **ECS** - Container orchestration
+- **RDS/Aurora** - Database deployment
+- **VPC/EC2** - Network infrastructure
+- **Lambda** - Serverless functions
+- **SQS** - Message queues
+- **EventBridge** - Scheduled events
+- **Secrets Manager** - Credential storage
+- **CloudWatch** - Logging and monitoring
+- **IAM** - Role and policy creation for services
+- **Application Load Balancer** - Load balancing
+- **S3** - CDK asset storage
+
+**For production environments:** Consider creating a more restrictive custom policy with only the specific permissions needed.
 
 ---
 
@@ -109,13 +156,16 @@ git push azure develop  # if you have a develop branch
 
 ### Development Service Connection
 
+**Prerequisites:** Install the [AWS Toolkit for Azure DevOps](https://marketplace.visualstudio.com/items?itemName=AmazonWebServices.aws-vsts-tools) extension if not already installed.
+
 1. In Azure DevOps, click **Project Settings** (bottom left corner)
 2. Under **Pipelines**, click **Service connections**
 3. Click **New service connection**
-4. Select **AWS for .NET Core and .NET Standard**
+4. Search for and select **AWS for .NET Core and .NET Standard**
+   - Note: Despite the name, this works for all AWS services, not just .NET applications
 5. Configure the connection:
-   - **Access Key ID**: Retrieve from `creds.txt` file
-   - **Secret Access Key**: Retrieve from `creds.txt` file
+   - **Access Key ID**: Enter your AWS access key (from IAM user created above)
+   - **Secret Access Key**: Enter your AWS secret key (from IAM user created above)
    - **Service connection name**: `aws-dev-service-connection`
    - **Description**: AWS credentials for development environment
    - **Grant access permission to all pipelines**: ✓ (checked)
@@ -522,10 +572,12 @@ Add migration step to `azure-pipelines.yml` before deploying application:
 **Symptom**: "Access denied" or authentication errors
 
 **Solutions**:
-- Verify service connection uses correct credentials from `creds.txt`
+- Verify service connection uses correct AWS credentials
 - Test AWS credentials locally: `aws sts get-caller-identity`
-- Check IAM permissions include CloudFormation, ECS, ECR, RDS, etc.
+- Check IAM user has required permissions (PowerUserAccess or custom policy)
+- Verify IAM user has permissions for: CloudFormation, ECS, ECR, RDS, VPC, Lambda, SQS, etc.
 - Verify AWS_ACCOUNT_ID in variable group matches your account
+- Check if MFA is required on the IAM user (not recommended for service accounts)
 
 ### Docker Build Fails
 
