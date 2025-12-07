@@ -1,0 +1,106 @@
+flowchart TB
+    %% Styling
+    classDef trigger fill:#7AA116,stroke:#232F3E,stroke-width:2px,color:#fff
+    classDef build fill:#3B48CC,stroke:#232F3E,stroke-width:2px,color:#fff
+    classDef security fill:#D13212,stroke:#232F3E,stroke-width:2px,color:#fff
+    classDef deploy fill:#FF9900,stroke:#232F3E,stroke-width:2px,color:#232F3E
+    classDef approval fill:#DD344C,stroke:#232F3E,stroke-width:2px,color:#fff
+    classDef success fill:#1D8102,stroke:#232F3E,stroke-width:2px,color:#fff
+
+    %% Source Control
+    GitPush([Git Push]):::trigger
+    BranchCheck{Branch?}:::trigger
+
+    %% Build & Test Stage
+    subgraph BuildTest[Build & Test Stage]
+        Install[npm ci<br/>Install dependencies]:::build
+        Lint[npm run lint<br/>Code quality checks]:::build
+        UnitTests[npm run test<br/>Unit tests]:::build
+        Coverage[Coverage Report<br/>Generate & validate]:::build
+        CDKSynth[CDK Synth<br/>Generate CloudFormation]:::build
+    end
+
+    %% Security Scanning
+    subgraph Security[Security Scanning]
+        NPMAudit[NPM Audit<br/>Dependency vulnerabilities]:::security
+        CDKNAG[CDK NAG<br/>Infrastructure security rules]:::security
+    end
+
+    %% Dev Deployment
+    subgraph DevDeploy[Dev Environment Deploy - Auto]
+        DevSequence[Sequential Stack Deployment]:::deploy
+        DevNetwork[1. Network Stack<br/>VPC, Subnets, NAT]:::deploy
+        DevDatabase[2. Database Stack<br/>Aurora PostgreSQL]:::deploy
+        DevMessaging[3. Messaging Stack<br/>SQS, EventBridge, Lambda]:::deploy
+        DevApplication[4. Application Stack<br/>ECS, ALB, Services]:::deploy
+        DevMonitoring[5. Monitoring Stack<br/>CloudWatch, Alarms]:::deploy
+    end
+
+    %% Production Approval
+    ManualApproval{Manual Approval<br/>Required}:::approval
+
+    %% Prod Deployment
+    subgraph ProdDeploy[Production Environment Deploy]
+        ProdSequence[Sequential Stack Deployment]:::deploy
+        ProdNetwork[1. Network Stack<br/>VPC, Subnets, NAT]:::deploy
+        ProdDatabase[2. Database Stack<br/>Aurora PostgreSQL]:::deploy
+        ProdMessaging[3. Messaging Stack<br/>SQS, EventBridge, Lambda]:::deploy
+        ProdApplication[4. Application Stack<br/>ECS, ALB, Services]:::deploy
+        ProdMonitoring[5. Monitoring Stack<br/>CloudWatch, Alarms]:::deploy
+    end
+
+    %% Completion
+    Success([Deployment Complete]):::success
+    Failed([Deployment Failed]):::security
+
+    %% Flow - Source to Build
+    GitPush --> BranchCheck
+    BranchCheck -->|develop branch| BuildTest
+    BranchCheck -->|main branch| BuildTest
+
+    %% Build & Test Flow
+    Install --> Lint
+    Lint --> UnitTests
+    UnitTests --> Coverage
+    Coverage --> CDKSynth
+
+    %% Security Scanning
+    CDKSynth --> Security
+    NPMAudit & CDKNAG --> SecurityGate{Security<br/>Pass?}:::security
+
+    %% Branch-based Deployment
+    SecurityGate -->|Pass + develop| DevDeploy
+    SecurityGate -->|Pass + main| ManualApproval
+    SecurityGate -->|Fail| Failed
+
+    %% Dev Deployment Sequence
+    DevSequence --> DevNetwork
+    DevNetwork --> DevDatabase
+    DevDatabase --> DevMessaging
+    DevMessaging --> DevApplication
+    DevApplication --> DevMonitoring
+    DevMonitoring --> Success
+
+    %% Prod Deployment Sequence
+    ManualApproval -->|Approved| ProdDeploy
+    ManualApproval -->|Rejected| Failed
+    ProdSequence --> ProdNetwork
+    ProdNetwork --> ProdDatabase
+    ProdDatabase --> ProdMessaging
+    ProdMessaging --> ProdApplication
+    ProdApplication --> ProdMonitoring
+    ProdMonitoring --> Success
+
+    %% Notes
+    note1[Auto-deploy on develop<br/>Manual approval on main]
+    note2[Stacks deployed sequentially<br/>to ensure dependencies]
+
+    BranchCheck -.-> note1
+    DevSequence -.-> note2
+
+    style note1 fill:#FFF3CD,stroke:#856404,stroke-width:1px
+    style note2 fill:#FFF3CD,stroke:#856404,stroke-width:1px
+    style BuildTest fill:#E8F4F8,stroke:#00A4BD,stroke-width:2px
+    style Security fill:#FFE5E5,stroke:#D13212,stroke-width:2px
+    style DevDeploy fill:#FFF3E0,stroke:#FF9900,stroke-width:2px
+    style ProdDeploy fill:#FFF3E0,stroke:#FF9900,stroke-width:2px

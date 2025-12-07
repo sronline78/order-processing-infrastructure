@@ -1,0 +1,58 @@
+flowchart TB
+    %% Styling
+    classDef awsService fill:#FF9900,stroke:#232F3E,stroke-width:2px,color:#232F3E
+    classDef dataStore fill:#3B48CC,stroke:#232F3E,stroke-width:2px,color:#fff
+    classDef deadLetter fill:#D13212,stroke:#232F3E,stroke-width:2px,color:#fff
+    classDef user fill:#7AA116,stroke:#232F3E,stroke-width:2px,color:#fff
+    classDef secrets fill:#DD344C,stroke:#232F3E,stroke-width:2px,color:#fff
+
+    %% User Layer
+    User([User/Browser]):::user
+
+    %% Event-Driven Order Generation
+    EventBridge[EventBridge Rule<br/>5 minute trigger]:::awsService
+    OrderGenLambda[Order Generator Lambda<br/>Generates random orders]:::awsService
+
+    %% Messaging Layer
+    SQS[SQS Queue<br/>Order Queue]:::awsService
+    DLQ[Dead Letter Queue<br/>Failed Messages]:::deadLetter
+
+    %% Application Load Balancer
+    ALB[Application Load Balancer<br/>Path-based routing]:::awsService
+
+    %% ECS Services
+    subgraph ECS_Cluster[ECS Cluster]
+        Frontend[Frontend ECS Service<br/>React/Web UI]:::awsService
+        Backend[Backend ECS Service<br/>Order Processing API]:::awsService
+    end
+
+    %% Data & Secrets
+    Aurora[(Aurora PostgreSQL<br/>Order Database)]:::dataStore
+    SecretsManager[Secrets Manager<br/>DB Credentials]:::secrets
+
+    %% Flow Connections
+    EventBridge -->|Triggers every 5 min| OrderGenLambda
+    OrderGenLambda -->|Sends order messages| SQS
+
+    SQS -->|Polls for messages| Backend
+    SQS -.->|After 3 retries| DLQ
+
+    Backend -->|Reads credentials| SecretsManager
+    Backend -->|Inserts processed orders| Aurora
+
+    User -->|HTTP/HTTPS requests| ALB
+    ALB -->|/* requests| Frontend
+    ALB -->|/api/* requests| Backend
+
+    Frontend -->|API calls via /api/*| ALB
+
+    %% Notes
+    note1[Retry Policy: Max 3 attempts<br/>Visibility timeout: 30s]
+    note2[Path Rules:<br/>/* → Frontend<br/>/api/* → Backend]
+
+    SQS -.-> note1
+    ALB -.-> note2
+
+    style note1 fill:#FFF3CD,stroke:#856404,stroke-width:1px
+    style note2 fill:#FFF3CD,stroke:#856404,stroke-width:1px
+    style ECS_Cluster fill:#E8F4F8,stroke:#00A4BD,stroke-width:2px

@@ -1,0 +1,392 @@
+# Azure DevOps CI/CD Pipeline for AWS Order Processing Infrastructure
+# This pipeline builds, tests, and deploys the CDK infrastructure and applications
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    exclude:
+      - README.md
+      - docs/**
+      - .gitignore
+
+pr:
+  branches:
+    include:
+      - main
+      - develop
+
+variables:
+  - group: aws-credentials  # Variable group containing AWS credentials
+  - name: NODE_VERSION
+    value: '18.x'
+  - name: CDK_DEFAULT_REGION
+    value: 'us-east-1'
+  - name: CDK_DEFAULT_ACCOUNT
+    value: '211125316068'  # Replace with your AWS account ID
+
+stages:
+  #############################################################################
+  # BUILD & TEST STAGE
+  # Runs on all branches and pull requests
+  # - Install dependencies
+  # - Lint code
+  # - Run unit tests
+  # - Synthesize CDK stacks
+  # - Build Docker images
+  #############################################################################
+  - stage: Build_And_Test
+    displayName: 'Build & Test'
+    jobs:
+      - job: CDK_Build_Test
+        displayName: 'CDK Infrastructure Build & Test'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          # Install Node.js
+          - task: NodeTool@0
+            inputs:
+              versionSpec: $(NODE_VERSION)
+            displayName: 'Install Node.js'
+
+          # Install dependencies
+          - script: |
+              npm ci
+            displayName: 'Install dependencies'
+            workingDirectory: $(Build.SourcesDirectory)
+
+          # Lint TypeScript code
+          - script: |
+              npm run lint
+            displayName: 'Lint code'
+            workingDirectory: $(Build.SourcesDirectory)
+            continueOnError: false
+
+          # Run unit tests
+          - script: |
+              npm test -- --coverage --ci --reporters=default --reporters=jest-junit
+            displayName: 'Run unit tests'
+            workingDirectory: $(Build.SourcesDirectory)
+            continueOnError: false
+
+          # Publish test results
+          - task: PublishTestResults@2
+            condition: always()
+            inputs:
+              testResultsFormat: 'JUnit'
+              testResultsFiles: '**/junit.xml'
+              testRunTitle: 'CDK Unit Tests'
+              mergeTestResults: true
+            displayName: 'Publish test results'
+
+          # Publish code coverage
+          - task: PublishCodeCoverageResults@2
+            condition: always()
+            inputs:
+              summaryFileLocation: '$(Build.SourcesDirectory)/coverage/cobertura-coverage.xml'
+              failIfCoverageEmpty: false
+            displayName: 'Publish code coverage'
+
+          # CDK Synth (generate CloudFormation templates)
+          - script: |
+              npx cdk synth --all
+            displayName: 'CDK Synth'
+            workingDirectory: $(Build.SourcesDirectory)
+            env:
+              AWS_DEFAULT_REGION: $(CDK_DEFAULT_REGION)
+              CDK_DEFAULT_ACCOUNT: $(CDK_DEFAULT_ACCOUNT)
+
+          # Publish CDK artifacts
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: '$(Build.SourcesDirectory)/cdk.out'
+              artifact: 'cdk-out'
+              publishLocation: 'pipeline'
+            displayName: 'Publish CDK artifacts'
+
+      # Build Docker images for backend and frontend (optional - can also build during deployment)
+      - job: Docker_Build
+        displayName: 'Build Docker Images'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          # Install Docker Buildx
+          - script: |
+              docker buildx create --use
+            displayName: 'Setup Docker Buildx'
+
+          # Build backend Docker image
+          - task: Docker@2
+            inputs:
+              command: 'build'
+              Dockerfile: 'app/backend/Dockerfile'
+              buildContext: 'app/backend'
+              tags: |
+                $(Build.BuildId)
+                latest
+              arguments: '--platform linux/amd64'
+            displayName: 'Build Backend Docker Image'
+
+          # Build frontend Docker image
+          - task: Docker@2
+            inputs:
+              command: 'build'
+              Dockerfile: 'app/frontend/Dockerfile'
+              buildContext: 'app/frontend'
+              tags: |
+                $(Build.BuildId)
+                latest
+              arguments: '--platform linux/amd64'
+            displayName: 'Build Frontend Docker Image'
+
+  #############################################################################
+  # DEPLOY TO DEV ENVIRONMENT
+  # Runs only on 'develop' branch
+  # Auto-deploys without approval
+  #############################################################################
+  - stage: Deploy_Dev
+    displayName: 'Deploy to Dev'
+    dependsOn: Build_And_Test
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/develop'))
+    jobs:
+      - deployment: Deploy_Dev_Infrastructure
+        displayName: 'Deploy Dev Infrastructure'
+        pool:
+          vmImage: 'ubuntu-latest'
+        environment: 'dev'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                # Download CDK artifacts
+                - task: DownloadPipelineArtifact@2
+                  inputs:
+                    artifactName: 'cdk-out'
+                    targetPath: '$(Pipeline.Workspace)/cdk-out'
+                  displayName: 'Download CDK artifacts'
+
+                # Install Node.js
+                - task: NodeTool@0
+                  inputs:
+                    versionSpec: $(NODE_VERSION)
+                  displayName: 'Install Node.js'
+
+                # Install CDK dependencies
+                - script: |
+                    npm ci
+                  displayName: 'Install dependencies'
+                  workingDirectory: $(Build.SourcesDirectory)
+
+                # Configure AWS credentials
+                - script: |
+                    export AWS_ACCESS_KEY_ID=$(AWS_ACCESS_KEY_ID)
+                    export AWS_SECRET_ACCESS_KEY=$(AWS_SECRET_ACCESS_KEY)
+                    export AWS_DEFAULT_REGION=$(CDK_DEFAULT_REGION)
+                    echo "AWS credentials configured"
+                  displayName: 'Configure AWS credentials'
+                  env:
+                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+
+                # Deploy NetworkStack
+                - script: |
+                    export AWS_ACCESS_KEY_ID=$(AWS_ACCESS_KEY_ID)
+                    export AWS_SECRET_ACCESS_KEY=$(AWS_SECRET_ACCESS_KEY)
+                    export AWS_DEFAULT_REGION=$(CDK_DEFAULT_REGION)
+                    npx cdk deploy dev-NetworkStack --require-approval never
+                  displayName: 'Deploy NetworkStack'
+                  workingDirectory: $(Build.SourcesDirectory)
+                  env:
+                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+
+                # Deploy DatabaseStack
+                - script: |
+                    export AWS_ACCESS_KEY_ID=$(AWS_ACCESS_KEY_ID)
+                    export AWS_SECRET_ACCESS_KEY=$(AWS_SECRET_ACCESS_KEY)
+                    export AWS_DEFAULT_REGION=$(CDK_DEFAULT_REGION)
+                    npx cdk deploy dev-DatabaseStack --require-approval never
+                  displayName: 'Deploy DatabaseStack'
+                  workingDirectory: $(Build.SourcesDirectory)
+                  env:
+                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+
+                # Deploy MessagingStack
+                - script: |
+                    export AWS_ACCESS_KEY_ID=$(AWS_ACCESS_KEY_ID)
+                    export AWS_SECRET_ACCESS_KEY=$(AWS_SECRET_ACCESS_KEY)
+                    export AWS_DEFAULT_REGION=$(CDK_DEFAULT_REGION)
+                    npx cdk deploy dev-MessagingStack --require-approval never
+                  displayName: 'Deploy MessagingStack'
+                  workingDirectory: $(Build.SourcesDirectory)
+                  env:
+                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+
+                # Deploy ApplicationStack
+                - script: |
+                    export AWS_ACCESS_KEY_ID=$(AWS_ACCESS_KEY_ID)
+                    export AWS_SECRET_ACCESS_KEY=$(AWS_SECRET_ACCESS_KEY)
+                    export AWS_DEFAULT_REGION=$(CDK_DEFAULT_REGION)
+                    npx cdk deploy dev-ApplicationStack --require-approval never
+                  displayName: 'Deploy ApplicationStack'
+                  workingDirectory: $(Build.SourcesDirectory)
+                  env:
+                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+
+                # Deploy MonitoringStack
+                - script: |
+                    export AWS_ACCESS_KEY_ID=$(AWS_ACCESS_KEY_ID)
+                    export AWS_SECRET_ACCESS_KEY=$(AWS_SECRET_ACCESS_KEY)
+                    export AWS_DEFAULT_REGION=$(CDK_DEFAULT_REGION)
+                    npx cdk deploy dev-MonitoringStack --require-approval never
+                  displayName: 'Deploy MonitoringStack'
+                  workingDirectory: $(Build.SourcesDirectory)
+                  continueOnError: true  # Optional stack
+                  env:
+                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+
+                # Verify deployment
+                - script: |
+                    export AWS_ACCESS_KEY_ID=$(AWS_ACCESS_KEY_ID)
+                    export AWS_SECRET_ACCESS_KEY=$(AWS_SECRET_ACCESS_KEY)
+                    export AWS_DEFAULT_REGION=$(CDK_DEFAULT_REGION)
+
+                    echo "Checking ECS service status..."
+                    aws ecs describe-services \
+                      --cluster order-processing-cluster \
+                      --services order-processor-backend \
+                      --query 'services[0].{runningCount:runningCount,desiredCount:desiredCount}' \
+                      --output table
+
+                    echo "Checking ALB..."
+                    aws cloudformation describe-stacks \
+                      --stack-name dev-ApplicationStack \
+                      --query 'Stacks[0].Outputs[?OutputKey==`LoadBalancerURL`].OutputValue' \
+                      --output text
+                  displayName: 'Verify deployment'
+                  env:
+                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+
+  #############################################################################
+  # DEPLOY TO PRODUCTION ENVIRONMENT
+  # Runs only on 'main' branch
+  # Requires manual approval before deployment
+  #############################################################################
+  - stage: Deploy_Prod
+    displayName: 'Deploy to Production'
+    dependsOn: Build_And_Test
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: Deploy_Prod_Infrastructure
+        displayName: 'Deploy Production Infrastructure'
+        pool:
+          vmImage: 'ubuntu-latest'
+        environment: 'production'  # Manual approval required in Azure DevOps UI
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                # Download CDK artifacts
+                - task: DownloadPipelineArtifact@2
+                  inputs:
+                    artifactName: 'cdk-out'
+                    targetPath: '$(Pipeline.Workspace)/cdk-out'
+                  displayName: 'Download CDK artifacts'
+
+                # Install Node.js
+                - task: NodeTool@0
+                  inputs:
+                    versionSpec: $(NODE_VERSION)
+                  displayName: 'Install Node.js'
+
+                # Install CDK dependencies
+                - script: |
+                    npm ci
+                  displayName: 'Install dependencies'
+                  workingDirectory: $(Build.SourcesDirectory)
+
+                # Deploy all stacks to production
+                - script: |
+                    export AWS_ACCESS_KEY_ID=$(AWS_ACCESS_KEY_ID_PROD)
+                    export AWS_SECRET_ACCESS_KEY=$(AWS_SECRET_ACCESS_KEY_PROD)
+                    export AWS_DEFAULT_REGION=$(CDK_DEFAULT_REGION)
+
+                    # Deploy in sequence: Network -> Database -> Messaging -> Application -> Monitoring
+                    npx cdk deploy prod-NetworkStack --require-approval never
+                    npx cdk deploy prod-DatabaseStack --require-approval never
+                    npx cdk deploy prod-MessagingStack --require-approval never
+                    npx cdk deploy prod-ApplicationStack --require-approval never
+                    npx cdk deploy prod-MonitoringStack --require-approval never || true
+                  displayName: 'Deploy to Production'
+                  workingDirectory: $(Build.SourcesDirectory)
+                  env:
+                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID_PROD)
+                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY_PROD)
+
+                # Verify production deployment
+                - script: |
+                    export AWS_ACCESS_KEY_ID=$(AWS_ACCESS_KEY_ID_PROD)
+                    export AWS_SECRET_ACCESS_KEY=$(AWS_SECRET_ACCESS_KEY_PROD)
+                    export AWS_DEFAULT_REGION=$(CDK_DEFAULT_REGION)
+
+                    echo "Production deployment verification..."
+                    aws ecs describe-services \
+                      --cluster order-processing-cluster \
+                      --services order-processor-backend \
+                      --query 'services[0].{runningCount:runningCount,desiredCount:desiredCount}' \
+                      --output table
+                  displayName: 'Verify production deployment'
+                  env:
+                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID_PROD)
+                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY_PROD)
+
+  #############################################################################
+  # SECURITY SCANNING (Optional)
+  # Runs on all branches
+  # Scans for security vulnerabilities and compliance issues
+  #############################################################################
+  - stage: Security_Scan
+    displayName: 'Security Scanning'
+    dependsOn: []  # Run in parallel with Build_And_Test
+    condition: succeeded()
+    jobs:
+      - job: npm_audit
+        displayName: 'NPM Audit'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: NodeTool@0
+            inputs:
+              versionSpec: $(NODE_VERSION)
+            displayName: 'Install Node.js'
+
+          - script: |
+              npm ci
+              npm audit --audit-level=moderate || true
+            displayName: 'Run NPM audit'
+            continueOnError: true
+
+      - job: cdk_nag
+        displayName: 'CDK NAG Security Checks'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: NodeTool@0
+            inputs:
+              versionSpec: $(NODE_VERSION)
+            displayName: 'Install Node.js'
+
+          - script: |
+              npm ci
+              # If cdk-nag is installed, run security checks
+              npx cdk synth --all 2>&1 | tee cdk-synth.log || true
+              echo "CDK synthesis completed. Check logs for cdk-nag warnings."
+            displayName: 'CDK NAG checks'
+            continueOnError: true

@@ -6,3 +6,24 @@ node_modules
 # CDK asset staging directory
 .cdk.staging
 cdk.out
+cdk.context.json
+
+# Python virtual environment
+.venv
+scripts/
+
+# Archive directory
+archive/
+
+# Temporary and OS files
+.DS_Store
+*.log
+*.tmp
+
+# Build artifacts
+*.d.ts.map
+
+# Test artifacts
+coverage/
+test-results.xml
+*.lcov
