@@ -17,6 +17,11 @@ on:
       - main
       - develop
 
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
 env:
   NODE_VERSION: '18.x'
   AWS_REGION: 'us-east-1'
