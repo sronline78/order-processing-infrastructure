@@ -241,8 +241,8 @@ jobs:
             --query 'Stacks[0].Outputs[?OutputKey==`LoadBalancerURL`].OutputValue' \
             --output text)
 
-          echo "alb_url=http://${ALB_URL}" >> $GITHUB_OUTPUT
-          echo "Application Load Balancer URL: http://${ALB_URL}"
+          echo "alb_url=${ALB_URL}" >> $GITHUB_OUTPUT
+          echo "Application Load Balancer URL: ${ALB_URL}"
 
   #############################################################################
   # DEPLOY TO PRODUCTION ENVIRONMENT
