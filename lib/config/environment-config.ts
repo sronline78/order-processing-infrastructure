@@ -11,6 +11,7 @@ export interface DatabaseConfig {
   maxCapacity: number;
   backupRetention: number;
   deletionProtection: boolean;
+  readerInstances: number;
 }
 
 export interface EcsConfig {
@@ -75,10 +76,11 @@ export const DEV_CONFIG: EnvironmentConfig = {
     natGateways: 1, 
   },
   databaseConfig: {
-    minCapacity: 0, // Scale to 0 for cost savings
+    minCapacity: 0.5, // Always on to avoid cold starts
     maxCapacity: 1,
     backupRetention: 7,
     deletionProtection: false,
+    readerInstances: 0, // Single instance for dev
   },
   ecsConfig: {
     backendCpu: 512,
@@ -132,6 +134,7 @@ export const PROD_CONFIG: EnvironmentConfig = {
     maxCapacity: 4,
     backupRetention: 35,
     deletionProtection: true,
+    readerInstances: 1, // 1 reader for HA in production
   },
   ecsConfig: {
     backendCpu: 512,

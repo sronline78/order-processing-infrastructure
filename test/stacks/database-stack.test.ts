@@ -30,6 +30,7 @@ describe('DatabaseStack', () => {
         maxCapacity: 1,
         backupRetention: 7,
         deletionProtection: false,
+        readerInstances: 0,
       },
       monitoringConfig: {
         logRetentionDays: logs.RetentionDays.ONE_WEEK,

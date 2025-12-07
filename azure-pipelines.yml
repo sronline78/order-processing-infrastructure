@@ -19,7 +19,7 @@ pr:
       - develop
 
 variables:
-  - group: aws-credentials  # Variable group containing AWS credentials
+  - group: aws-creds  # Variable group containing AWS credentials
   - name: NODE_VERSION
     value: '18.x'
   - name: CDK_DEFAULT_REGION
@@ -155,7 +155,7 @@ stages:
         displayName: 'Deploy Dev Infrastructure'
         pool:
           vmImage: 'ubuntu-latest'
-        environment: 'dev'
+        environment: 'development'
         strategy:
           runOnce:
             deploy:
@@ -278,74 +278,76 @@ stages:
   # DEPLOY TO PRODUCTION ENVIRONMENT
   # Runs only on 'main' branch
   # Requires manual approval before deployment
+  # COMMENTED OUT: No production AWS account available
+  # Uncomment when production account is ready
   #############################################################################
-  - stage: Deploy_Prod
-    displayName: 'Deploy to Production'
-    dependsOn: Build_And_Test
-    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
-    jobs:
-      - deployment: Deploy_Prod_Infrastructure
-        displayName: 'Deploy Production Infrastructure'
-        pool:
-          vmImage: 'ubuntu-latest'
-        environment: 'production'  # Manual approval required in Azure DevOps UI
-        strategy:
-          runOnce:
-            deploy:
-              steps:
-                # Download CDK artifacts
-                - task: DownloadPipelineArtifact@2
-                  inputs:
-                    artifactName: 'cdk-out'
-                    targetPath: '$(Pipeline.Workspace)/cdk-out'
-                  displayName: 'Download CDK artifacts'
+  # - stage: Deploy_Prod
+  #   displayName: 'Deploy to Production'
+  #   dependsOn: Build_And_Test
+  #   condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  #   jobs:
+  #     - deployment: Deploy_Prod_Infrastructure
+  #       displayName: 'Deploy Production Infrastructure'
+  #       pool:
+  #         vmImage: 'ubuntu-latest'
+  #       environment: 'production'  # Manual approval required in Azure DevOps UI
+  #       strategy:
+  #         runOnce:
+  #           deploy:
+  #             steps:
+  #               # Download CDK artifacts
+  #               - task: DownloadPipelineArtifact@2
+  #                 inputs:
+  #                   artifactName: 'cdk-out'
+  #                   targetPath: '$(Pipeline.Workspace)/cdk-out'
+  #                 displayName: 'Download CDK artifacts'
 
-                # Install Node.js
-                - task: NodeTool@0
-                  inputs:
-                    versionSpec: $(NODE_VERSION)
-                  displayName: 'Install Node.js'
+  #               # Install Node.js
+  #               - task: NodeTool@0
+  #                 inputs:
+  #                   versionSpec: $(NODE_VERSION)
+  #                 displayName: 'Install Node.js'
 
-                # Install CDK dependencies
-                - script: |
-                    npm ci
-                  displayName: 'Install dependencies'
-                  workingDirectory: $(Build.SourcesDirectory)
+  #               # Install CDK dependencies
+  #               - script: |
+  #                   npm ci
+  #                 displayName: 'Install dependencies'
+  #                 workingDirectory: $(Build.SourcesDirectory)
 
-                # Deploy all stacks to production
-                - script: |
-                    export AWS_ACCESS_KEY_ID=$(AWS_ACCESS_KEY_ID_PROD)
-                    export AWS_SECRET_ACCESS_KEY=$(AWS_SECRET_ACCESS_KEY_PROD)
-                    export AWS_DEFAULT_REGION=$(CDK_DEFAULT_REGION)
+  #               # Deploy all stacks to production
+  #               - script: |
+  #                   export AWS_ACCESS_KEY_ID=$(AWS_ACCESS_KEY_ID_PROD)
+  #                   export AWS_SECRET_ACCESS_KEY=$(AWS_SECRET_ACCESS_KEY_PROD)
+  #                   export AWS_DEFAULT_REGION=$(CDK_DEFAULT_REGION)
 
-                    # Deploy in sequence: Network -> Database -> Messaging -> Application -> Monitoring
-                    npx cdk deploy prod-NetworkStack --require-approval never
-                    npx cdk deploy prod-DatabaseStack --require-approval never
-                    npx cdk deploy prod-MessagingStack --require-approval never
-                    npx cdk deploy prod-ApplicationStack --require-approval never
-                    npx cdk deploy prod-MonitoringStack --require-approval never || true
-                  displayName: 'Deploy to Production'
-                  workingDirectory: $(Build.SourcesDirectory)
-                  env:
-                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID_PROD)
-                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY_PROD)
+  #                   # Deploy in sequence: Network -> Database -> Messaging -> Application -> Monitoring
+  #                   npx cdk deploy prod-NetworkStack --require-approval never
+  #                   npx cdk deploy prod-DatabaseStack --require-approval never
+  #                   npx cdk deploy prod-MessagingStack --require-approval never
+  #                   npx cdk deploy prod-ApplicationStack --require-approval never
+  #                   npx cdk deploy prod-MonitoringStack --require-approval never || true
+  #                 displayName: 'Deploy to Production'
+  #                 workingDirectory: $(Build.SourcesDirectory)
+  #                 env:
+  #                   AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID_PROD)
+  #                   AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY_PROD)
 
-                # Verify production deployment
-                - script: |
-                    export AWS_ACCESS_KEY_ID=$(AWS_ACCESS_KEY_ID_PROD)
-                    export AWS_SECRET_ACCESS_KEY=$(AWS_SECRET_ACCESS_KEY_PROD)
-                    export AWS_DEFAULT_REGION=$(CDK_DEFAULT_REGION)
+  #               # Verify production deployment
+  #               - script: |
+  #                   export AWS_ACCESS_KEY_ID=$(AWS_ACCESS_KEY_ID_PROD)
+  #                   export AWS_SECRET_ACCESS_KEY=$(AWS_SECRET_ACCESS_KEY_PROD)
+  #                   export AWS_DEFAULT_REGION=$(CDK_DEFAULT_REGION)
 
-                    echo "Production deployment verification..."
-                    aws ecs describe-services \
-                      --cluster order-processing-cluster \
-                      --services order-processor-backend \
-                      --query 'services[0].{runningCount:runningCount,desiredCount:desiredCount}' \
-                      --output table
-                  displayName: 'Verify production deployment'
-                  env:
-                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID_PROD)
-                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY_PROD)
+  #                   echo "Production deployment verification..."
+  #                   aws ecs describe-services \
+  #                     --cluster order-processing-cluster \
+  #                     --services order-processor-backend \
+  #                     --query 'services[0].{runningCount:runningCount,desiredCount:desiredCount}' \
+  #                     --output table
+  #                 displayName: 'Verify production deployment'
+  #                 env:
+  #                   AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID_PROD)
+  #                   AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY_PROD)
 
   #############################################################################
   # SECURITY SCANNING (Optional)

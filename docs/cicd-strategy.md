@@ -1,12 +1,109 @@
-# CI/CD Strategy: Azure DevOps Pipeline
+# CI/CD Strategy
+
+## Table of Contents
+- [Overview](#overview)
+- [GitHub Actions Pipeline](#github-actions-pipeline)
+  - [Workflow Architecture](#workflow-architecture)
+  - [Pipeline Jobs](#pipeline-jobs)
+  - [Configuration](#configuration)
+  - [Best Practices](#best-practices)
+- [Azure DevOps Alternative](#azure-devops-alternative)
+  - [Pipeline Architecture](#pipeline-architecture-1)
+  - [Configuration Requirements](#configuration-requirements)
+- [Development Workflow](#development-workflow)
+  - [Branch Strategy](#branch-strategy)
+  - [Database Migrations](#database-migrations)
+  - [Secret Management](#secret-management)
+- [Operational Practices](#operational-practices)
+  - [Rollback Strategy](#rollback-strategy)
+  - [Testing Strategy](#testing-strategy)
+  - [Monitoring](#monitoring)
+  - [Cost Optimization](#cost-optimization)
+- [References](#references)
 
 ## Overview
 
-This document outlines the CI/CD strategy for the Order Processing Infrastructure using **Azure DevOps Pipelines**. The pipeline automates testing, building, and deployment of both the infrastructure (AWS CDK) and applications (Docker containers).
+The Order Processing Infrastructure uses **GitHub Actions** for automated CI/CD. The pipeline builds, tests, and deploys infrastructure changes to AWS automatically when code is pushed to the develop branch.
 
-## Pipeline Architecture
+**Why GitHub Actions?** It provides immediate access without parallelism approval delays, built-in secrets management, and seamless GitHub integration. For teams preferring Azure DevOps, a compatible pipeline configuration is also available.
 
-### Multi-Stage Pipeline Design
+## GitHub Actions Pipeline
+
+### Workflow Architecture
+
+The pipeline implements a four-job workflow that runs on every push to the develop branch:
+
+```
+┌─────────────────────┐
+│  Build & Test       │  - Install dependencies
+│                     │  - Lint TypeScript code
+│                     │  - Run 59 unit tests
+│                     │  - CDK synth
+│                     │  - Publish artifacts
+└──────────┬──────────┘
+           │
+           ├──────────────────────┬─────────────────────┐
+           │                      │                     │
+           ▼                      ▼                     ▼
+┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
+│ Build Docker     │  │ Security Scan    │  │ Deploy to Dev    │
+│ Images           │  │                  │  │                  │
+│ - Backend        │  │ - NPM Audit      │  │ - NetworkStack   │
+│ - Frontend       │  │ - CDK NAG        │  │ - DatabaseStack  │
+└──────────┬───────┘  └────────┬─────────┘  │ - MessagingStack │
+           │                   │             │ - AppStack       │
+           └───────────┬───────┘             │ - Verify Health  │
+                       │                     │                  │
+                       └─────────────────────┘                  │
+                                             └──────────────────┘
+```
+
+The entire pipeline completes in approximately 13 minutes from commit to deployed infrastructure.
+
+### Pipeline Jobs
+
+**1. build-and-test** (Always runs)
+
+This foundational job validates code quality and functionality. It installs Node.js dependencies, runs TypeScript linting, executes 59 unit tests with coverage reporting, and synthesizes CloudFormation templates via CDK. The generated templates are uploaded as artifacts for the deployment stage.
+
+**2. build-docker** (Parallel execution)
+
+Builds production-ready Docker images for both backend and frontend services. Images are built for linux/amd64 platform with layer caching enabled to reduce build times by ~30%.
+
+**3. security-scan** (Parallel execution)
+
+Performs vulnerability scanning using npm audit and CDK NAG security checks. This job runs in informational mode (doesn't block deployment) to provide early warnings about potential security issues.
+
+**4. deploy-dev** (Runs only on develop branch)
+
+Downloads CDK artifacts and deploys all infrastructure stacks to the development environment. Stacks are deployed sequentially (Network → Database → Messaging → Application) to respect dependencies. After deployment, the job verifies ECS service health and ALB endpoint availability.
+
+### Configuration
+
+**Trigger:** Pushes to `develop` branch (excludes README.md, docs/**, .gitignore)
+
+**Required GitHub Secrets:**
+- `AWS_ACCESS_KEY_ID` - IAM user access key for CDK deployments
+- `AWS_SECRET_ACCESS_KEY` - IAM user secret key for CDK deployments
+
+**GitHub Environment:**
+- `development` - Auto-deploys on develop branch commits
+
+### Best Practices
+
+**Secrets Management:** AWS credentials are stored as encrypted GitHub Secrets, never exposed in logs, and scoped to the repository only.
+
+**Caching Strategy:** NPM packages and Docker layers are cached using GitHub Actions cache, reducing build time by approximately 30%.
+
+**Parallel Execution:** Docker builds and security scans run concurrently to maximize pipeline efficiency.
+
+**Artifact Retention:** CDK CloudFormation templates are retained for 7 days for auditing and debugging purposes.
+
+## Azure DevOps Alternative
+
+### Pipeline Architecture
+
+For organizations using Azure DevOps, a complete pipeline configuration (`azure-pipelines.yml`) is available. The pipeline follows a three-stage approach:
 
 ```
 ┌─────────────────┐
@@ -32,430 +129,74 @@ This document outlines the CI/CD strategy for the Order Processing Infrastructur
 └─────────────────┘
 ```
 
-### azure-pipelines.yml
+**Note:** Azure DevOps free tier requires parallelism grant approval, which can take 2-3 business days. Setup instructions are in [docs/azure-devops-setup-guide.md](./azure-devops-setup-guide.md).
 
-```yaml
-trigger:
-  branches:
-    include:
-      - main
-      - develop
-  paths:
-    exclude:
-      - README.md
-      - docs/**
+### Configuration Requirements
 
-pr:
-  branches:
-    include:
-      - main
-      - develop
+**Service Connections:**
+- `aws-dev-service-connection` - AWS access for development environment
+- `aws-prod-service-connection` - AWS access for production environment
 
-variables:
-  - group: aws-credentials
-  - name: NODE_VERSION
-    value: '20.x'
-  - name: AWS_REGION
-    value: 'us-east-1'
+**Variable Groups:**
+- `aws-credentials` - Contains AWS_ACCOUNT_ID and AWS_REGION for development
+- `aws-credentials-prod` - Contains production account credentials
 
-stages:
-  ##############################################################################
-  # Stage 1: Build, Test, and Validate
-  ##############################################################################
-  - stage: Build
-    displayName: 'Build and Test'
-    jobs:
-      - job: Build
-        displayName: 'Build and Test Infrastructure'
-        pool:
-          vmImage: 'ubuntu-latest'
+**Environments:**
+- `development` - Auto-deploy, no approvals required
+- `production` - Requires 2 approvers, business hours gate, deployment window limits
 
-        steps:
-          # Setup Node.js
-          - task: NodeTool@0
-            inputs:
-              versionSpec: '$(NODE_VERSION)'
-            displayName: 'Install Node.js'
+## Development Workflow
 
-          # Install dependencies
-          - script: npm ci
-            displayName: 'Install CDK dependencies'
-            workingDirectory: '$(Build.SourcesDirectory)'
+### Branch Strategy
 
-          # Install backend dependencies
-          - script: npm ci
-            displayName: 'Install backend dependencies'
-            workingDirectory: '$(Build.SourcesDirectory)/app/backend'
-
-          # Install frontend dependencies
-          - script: npm ci
-            displayName: 'Install frontend dependencies'
-            workingDirectory: '$(Build.SourcesDirectory)/app/frontend'
-
-          # Run ESLint
-          - script: npm run lint
-            displayName: 'Run linting'
-            workingDirectory: '$(Build.SourcesDirectory)'
-            continueOnError: false
-
-          # Run tests
-          - script: npm test -- --coverage
-            displayName: 'Run unit tests'
-            workingDirectory: '$(Build.SourcesDirectory)'
-            continueOnError: false
-
-          # Publish test results
-          - task: PublishTestResults@2
-            condition: succeededOrFailed()
-            inputs:
-              testResultsFormat: 'JUnit'
-              testResultsFiles: '**/test-results.xml'
-              failTaskOnFailedTests: true
-            displayName: 'Publish test results'
-
-          # Publish code coverage
-          - task: PublishCodeCoverageResults@1
-            condition: succeededOrFailed()
-            inputs:
-              codeCoverageTool: 'Cobertura'
-              summaryFileLocation: '$(Build.SourcesDirectory)/coverage/cobertura-coverage.xml'
-            displayName: 'Publish code coverage'
-
-          # CDK synth
-          - script: npx cdk synth
-            displayName: 'CDK synth'
-            env:
-              ENVIRONMENT: dev
-              AWS_REGION: $(AWS_REGION)
-
-          # Publish CDK assets
-          - task: PublishBuildArtifacts@1
-            inputs:
-              PathtoPublish: 'cdk.out'
-              ArtifactName: 'cdk-output'
-            displayName: 'Publish CDK output'
-
-  ##############################################################################
-  # Stage 2: Deploy to Development Environment
-  ##############################################################################
-  - stage: DeployDev
-    displayName: 'Deploy to Development'
-    dependsOn: Build
-    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/develop'))
-    jobs:
-      - deployment: DeployDev
-        displayName: 'Deploy to Dev Environment'
-        environment: 'development'
-        pool:
-          vmImage: 'ubuntu-latest'
-
-        strategy:
-          runOnce:
-            deploy:
-              steps:
-                # Setup Node.js
-                - task: NodeTool@0
-                  inputs:
-                    versionSpec: '$(NODE_VERSION)'
-                  displayName: 'Install Node.js'
-
-                # Install dependencies
-                - script: npm ci
-                  displayName: 'Install dependencies'
-
-                # Configure AWS credentials
-                - task: AWSShellScript@1
-                  inputs:
-                    awsCredentials: 'aws-dev-service-connection'
-                    regionName: '$(AWS_REGION)'
-                    scriptType: 'inline'
-                    inlineScript: |
-                      echo "AWS credentials configured"
-                  displayName: 'Configure AWS credentials'
-
-                # Build and push backend Docker image
-                - script: |
-                    aws ecr get-login-password --region $(AWS_REGION) | docker login --username AWS --password-stdin $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com
-                    docker build -t order-processor-backend:$(Build.BuildId) ./app/backend
-                    docker tag order-processor-backend:$(Build.BuildId) $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/order-processor-backend:latest
-                    docker tag order-processor-backend:$(Build.BuildId) $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/order-processor-backend:$(Build.BuildId)
-                    docker push $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/order-processor-backend:latest
-                    docker push $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/order-processor-backend:$(Build.BuildId)
-                  displayName: 'Build and push backend image'
-                  env:
-                    AWS_ACCOUNT_ID: $(AWS_ACCOUNT_ID)
-                    AWS_REGION: $(AWS_REGION)
-
-                # Build and push frontend Docker image
-                - script: |
-                    docker build -t order-processor-frontend:$(Build.BuildId) ./app/frontend
-                    docker tag order-processor-frontend:$(Build.BuildId) $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/order-processor-frontend:latest
-                    docker tag order-processor-frontend:$(Build.BuildId) $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/order-processor-frontend:$(Build.BuildId)
-                    docker push $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/order-processor-frontend:latest
-                    docker push $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/order-processor-frontend:$(Build.BuildId)
-                  displayName: 'Build and push frontend image'
-                  env:
-                    AWS_ACCOUNT_ID: $(AWS_ACCOUNT_ID)
-                    AWS_REGION: $(AWS_REGION)
-
-                # Deploy infrastructure with CDK
-                - script: |
-                    export ENVIRONMENT=dev
-                    npx cdk deploy --all --require-approval never
-                  displayName: 'Deploy CDK stacks'
-                  env:
-                    AWS_REGION: $(AWS_REGION)
-                    ENVIRONMENT: dev
-
-                # Run deployment tests
-                - script: |
-                    chmod +x ./scripts/test-deployment.sh
-                    ./scripts/test-deployment.sh
-                  displayName: 'Run deployment tests'
-                  env:
-                    AWS_REGION: $(AWS_REGION)
-
-  ##############################################################################
-  # Stage 3: Deploy to Production Environment
-  ##############################################################################
-  - stage: DeployProd
-    displayName: 'Deploy to Production'
-    dependsOn: Build
-    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
-    jobs:
-      - deployment: DeployProd
-        displayName: 'Deploy to Production Environment'
-        environment: 'production'
-        pool:
-          vmImage: 'ubuntu-latest'
-
-        strategy:
-          runOnce:
-            deploy:
-              steps:
-                # Setup Node.js
-                - task: NodeTool@0
-                  inputs:
-                    versionSpec: '$(NODE_VERSION)'
-                  displayName: 'Install Node.js'
-
-                # Install dependencies
-                - script: npm ci
-                  displayName: 'Install dependencies'
-
-                # Configure AWS credentials
-                - task: AWSShellScript@1
-                  inputs:
-                    awsCredentials: 'aws-prod-service-connection'
-                    regionName: '$(AWS_REGION)'
-                    scriptType: 'inline'
-                    inlineScript: |
-                      echo "AWS credentials configured for production"
-                  displayName: 'Configure AWS credentials'
-
-                # Build and push backend Docker image
-                - script: |
-                    aws ecr get-login-password --region $(AWS_REGION) | docker login --username AWS --password-stdin $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com
-                    docker build -t order-processor-backend:$(Build.BuildId) ./app/backend
-                    docker tag order-processor-backend:$(Build.BuildId) $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/order-processor-backend:prod-$(Build.BuildId)
-                    docker push $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/order-processor-backend:prod-$(Build.BuildId)
-                  displayName: 'Build and push backend image'
-                  env:
-                    AWS_ACCOUNT_ID: $(AWS_ACCOUNT_ID_PROD)
-                    AWS_REGION: $(AWS_REGION)
-
-                # Build and push frontend Docker image
-                - script: |
-                    docker build -t order-processor-frontend:$(Build.BuildId) ./app/frontend
-                    docker tag order-processor-frontend:$(Build.BuildId) $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/order-processor-frontend:prod-$(Build.BuildId)
-                    docker push $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/order-processor-frontend:prod-$(Build.BuildId)
-                  displayName: 'Build and push frontend image'
-                  env:
-                    AWS_ACCOUNT_ID: $(AWS_ACCOUNT_ID_PROD)
-                    AWS_REGION: $(AWS_REGION)
-
-                # Deploy infrastructure with CDK
-                - script: |
-                    export ENVIRONMENT=prod
-                    npx cdk deploy --all --require-approval never
-                  displayName: 'Deploy CDK stacks'
-                  env:
-                    AWS_REGION: $(AWS_REGION)
-                    ENVIRONMENT: prod
-
-                # Run smoke tests
-                - script: |
-                    chmod +x ./scripts/test-deployment.sh
-                    ./scripts/test-deployment.sh
-                  displayName: 'Run smoke tests'
-                  env:
-                    AWS_REGION: $(AWS_REGION)
-```
-
-## Azure DevOps Configuration
-
-### Service Connections
-
-#### AWS Development Service Connection
-1. Navigate to **Project Settings** → **Service connections**
-2. Create new **AWS** service connection
-3. Name: `aws-dev-service-connection`
-4. Authentication: **Access Key**
-5. Configure:
-   - Access Key ID: `<dev-access-key-id>`
-   - Secret Access Key: `<dev-secret-access-key>`
-   - Default Region: `us-east-1`
-
-#### AWS Production Service Connection
-Same process but with production credentials:
-- Name: `aws-prod-service-connection`
-- Use separate IAM user with production-only permissions
-
-### Variable Groups
-
-#### aws-credentials (Development)
-```
-AWS_ACCOUNT_ID: 211125316068
-AWS_REGION: us-east-1
-```
-
-#### aws-credentials-prod (Production)
-```
-AWS_ACCOUNT_ID_PROD: <prod-account-id>
-AWS_REGION: us-east-1
-```
-
-### Environments
-
-#### Development Environment
-- Name: `development`
-- Approvals: None (auto-deploy)
-- Checks: None
-
-#### Production Environment
-- Name: `production`
-- Approvals: **Required** (4-eyes principle)
-  - Approvers: Team Lead, DevOps Engineer
-  - Minimum approvers: 2
-- Checks:
-  - Business hours gate (Mon-Fri, 9 AM - 5 PM)
-  - Deployment window (max 2 hours)
-
-## Branch Strategy
-
-### Git Flow Model
+The project follows a simplified Git Flow model:
 
 ```
-main (production)
+main (production-ready)
   │
-  ├── develop (development)
-  │     │
-  │     ├── feature/add-monitoring
-  │     ├── feature/improve-scaling
-  │     └── bugfix/fix-queue-processing
-  │
-  └── hotfix/critical-security-patch
+  └── develop (active development)
+        │
+        ├── feature/add-monitoring
+        ├── feature/improve-scaling
+        └── bugfix/fix-queue-processing
 ```
 
-### Branch Policies
+**develop branch:** Auto-deploys to dev environment on every push. Requires 1 reviewer for pull requests.
 
-**main branch:**
-- Requires pull request
-- Requires 2 reviewers
-- Requires build validation (Build stage must pass)
-- No force push
-- Auto-deploy to production (with manual approval)
+**main branch:** Production-ready code. Currently not configured for auto-deployment as this is a demo environment.
 
-**develop branch:**
-- Requires pull request
-- Requires 1 reviewer
-- Requires build validation
-- Auto-deploy to dev environment
+### Database Migrations
 
-## Database Migration Strategy
+**Current Implementation (Development):**
 
-### Recommended Approach: Post-Deployment Lambda
+For the development environment, database schema is automatically managed on application startup using `CREATE TABLE IF NOT EXISTS` statements in `app/backend/src/database.ts:95-130`. When the backend container starts, it automatically:
+- Creates the `orders` table if it doesn't exist
+- Creates indexes for performance (created_at, customer_id)
+- Uses idempotent SQL statements safe for multiple runs
 
-Create a dedicated Lambda function for database migrations:
+This approach is suitable for development but not recommended for production as it doesn't provide version control or rollback capabilities.
 
-```typescript
-// lambda/db-migrations/index.ts
-import { SecretsManager } from '@aws-sdk/client-secrets-manager';
-import { Pool } from 'pg';
+**Production-Ready Approaches:**
 
-export async function handler(event: any) {
-  // 1. Retrieve database credentials from Secrets Manager
-  // 2. Connect to Aurora PostgreSQL
-  // 3. Run migrations from S3 or embedded
-  // 4. Return success/failure
-}
-```
+Two recommended approaches for production database migrations:
 
-Deploy in CDK:
-```typescript
-const migrationLambda = new lambda.Function(this, 'MigrationLambda', {
-  runtime: lambda.Runtime.NODEJS_20_X,
-  handler: 'index.handler',
-  code: lambda.Code.fromAsset('lambda/db-migrations'),
-  vpc: props.vpc,
-  environment: {
-    DB_SECRET_ARN: props.database.secret!.secretArn,
-  },
-});
+1. **Lambda Function Approach:** Deploy a dedicated Lambda function with VPC access to Aurora. The function retrieves credentials from Secrets Manager, runs versioned migration scripts, and tracks applied versions in a `schema_migrations` table. The pipeline invokes the Lambda after infrastructure deployment.
 
-props.database.secret!.grantRead(migrationLambda);
-```
+2. **ECS Migration Task:** Run migrations as an ECS Fargate task before application deployment using `aws ecs run-task`. This approach uses the same container image but overrides the command to run migration scripts. See `docs/azure-devops-setup-guide.md` for detailed implementation with example migration runner code.
 
-Invoke in pipeline:
-```yaml
-- script: |
-    aws lambda invoke \
-      --function-name migration-lambda \
-      --payload '{"action":"migrate"}' \
-      response.json
-    cat response.json
-  displayName: 'Run database migrations'
-```
+**Best Practices:** Manual review of migration scripts, dry-run in staging, database backups before production migrations, version tracking, transactional migrations, and documented rollback procedures.
 
-### Alternative: ECS Migration Task
+### Secret Management
 
-Run migrations as an ECS task before application deployment:
+**Database Credentials:** Auto-generated by Aurora during cluster creation and stored in AWS Secrets Manager. The secret ARN is exported as a stack output.
 
-```yaml
-- script: |
-    aws ecs run-task \
-      --cluster order-processing-cluster \
-      --task-definition migration-task:1 \
-      --launch-type FARGATE \
-      --network-configuration "awsvpcConfiguration={subnets=[subnet-xxx],securityGroups=[sg-xxx]}"
+**Application Secrets:** Created manually in Secrets Manager and referenced in CDK code.
 
-    # Wait for task completion
-    aws ecs wait tasks-stopped \
-      --cluster order-processing-cluster \
-      --tasks <task-arn>
-  displayName: 'Run database migrations'
-```
+**Pipeline Credentials:**
+- GitHub Actions: Stored as encrypted GitHub Secrets
+- Azure DevOps: Stored in Service Connections and Variable Groups
 
-### Production Best Practice
-
-For production:
-1. Manual review of migration scripts
-2. Dry-run in staging environment
-3. Database backup before migration
-4. Rollback plan documented
-
-## Secret Management
-
-### AWS Secrets Manager
-- **Database credentials**: Auto-generated by Aurora, stored in Secrets Manager
-- **Application secrets**: Manually created in Secrets Manager, referenced in CDK
-
-### Azure DevOps
-- **AWS credentials**: Stored in Service Connections (encrypted)
-- **Non-AWS secrets**: Stored in Variable Groups (marked as secret)
-
-### Runtime Access
-Applications retrieve secrets at runtime using IAM task roles:
+**Runtime Access:** Applications retrieve secrets using IAM task roles:
 
 ```typescript
 const client = new SecretsManagerClient({ region: 'us-east-1' });
@@ -465,92 +206,75 @@ const response = await client.send(
 const secret = JSON.parse(response.SecretString!);
 ```
 
-## Cost Optimization
+## Operational Practices
 
-### Development Environment
-- Use single NAT Gateway ($32/month)
-- Aurora: 0.5-1 ACU ($0.12-0.24/hour)
-- Stop ECS tasks when not in use
-- Delete stack overnight (optional)
+### Rollback Strategy
 
-### Production Environment
-- 3 NAT Gateways for HA ($96/month)
-- Aurora: 0.5-4 ACU auto-scaling
-- Reserved capacity for predictable workloads
-- S3 lifecycle policies for CloudTrail logs
+**Infrastructure Rollback:** CDK uses CloudFormation, which automatically rolls back on deployment failure. Manual rollback to a previous version:
 
-## Rollback Strategy
-
-### Infrastructure Rollback
-CDK CloudFormation stacks support automatic rollback on failure:
 ```bash
-# Manual rollback to previous version
 aws cloudformation update-stack \
   --stack-name dev-ApplicationStack \
   --use-previous-template
 ```
 
-### Application Rollback
-Update ECS service to use previous Docker image tag:
+**Application Rollback:** Update ECS service to use previous Docker image tag:
+
 ```bash
-# Update task definition to use previous image
 aws ecs update-service \
   --cluster order-processing-cluster \
   --service order-processor-backend \
   --task-definition backend-task-def:42  # Previous revision
 ```
 
-## Monitoring Pipeline Execution
+### Testing Strategy
 
-### Azure DevOps Insights
-- Build success rate
-- Deployment frequency
+**Build Stage:**
+- TypeScript linting via ESLint
+- 59 unit tests with Jest
+- CloudFormation template snapshot validation
+- npm audit security scanning
+
+**Deployment Stage:**
+- Endpoint verification via deployment scripts
+- ALB target group health checks
+- Basic smoke tests for critical paths
+
+**Post-Deployment:**
+- Integration tests covering end-to-end order processing
+- Load testing with Artillery.io or Locust
+- Security scans using OWASP ZAP or AWS Inspector
+
+### Monitoring
+
+**Pipeline Metrics:**
+- Build success rate and deployment frequency
 - Mean time to recovery (MTTR)
-- Change failure rate
+- Change failure rate (DORA metrics)
 
-### Notifications
-- **Slack/Teams integration**: Pipeline status updates
-- **Email notifications**: Failed deployments, approvals required
-- **SNS topics**: AWS infrastructure alerts
+**Notifications:**
+- Slack/Teams integration for pipeline status
+- Email alerts for failed deployments
+- SNS topics for AWS infrastructure alerts
 
-## Testing Strategy in CI/CD
+### Cost Optimization
 
-### Build Stage
-1. **Linting**: ESLint for TypeScript code quality
-2. **Unit tests**: Jest for CDK stacks and application logic
-3. **Snapshot tests**: CloudFormation template validation
-4. **Security scanning**: npm audit, Snyk
+**Development Environment:**
+- Single NAT Gateway: $32/month
+- Aurora Serverless v2: 0.5-1 ACU ($0.12-0.24/hour)
+- Single instance (no reader)
+- Stop ECS tasks when not actively testing
 
-### Deployment Stage
-1. **Deployment tests**: scripts/test-deployment.sh verifies endpoints
-2. **Smoke tests**: Critical user journeys
-3. **Health checks**: ALB target group health
-
-### Post-Deployment
-1. **Integration tests**: E2E order processing flow
-2. **Load tests**: Artillery.io or Locust
-3. **Security scans**: OWASP ZAP, AWS Inspector
-
-## Best Practices
-
-1. **Immutable Infrastructure**: Never manually modify deployed resources
-2. **Versioned Artifacts**: Tag Docker images with build IDs
-3. **Blue-Green Deployments**: Consider using ECS blue-green for zero-downtime
-4. **Feature Flags**: Use AWS AppConfig for gradual rollouts
-5. **Audit Logging**: Enable CloudTrail for all API calls
-6. **Least Privilege**: IAM roles grant only required permissions
-7. **Secrets Rotation**: Rotate credentials every 90 days
-8. **Backup Testing**: Regularly test database restore procedures
-
-## Continuous Improvement
-
-- **Weekly retrospectives**: Review pipeline failures
-- **Monthly metrics review**: Track DORA metrics
-- **Quarterly optimization**: Review costs and performance
-- **Annual architecture review**: Evaluate new AWS services
+**Production Environment:**
+- 3 NAT Gateways for HA: $96/month
+- Aurora Serverless v2: 0.5-4 ACU auto-scaling
+- 1 writer + 1 reader instance for high availability
+- Reserved capacity for predictable workloads
+- S3 lifecycle policies for log retention
 
 ## References
 
-- [Azure DevOps Pipelines Documentation](https://docs.microsoft.com/en-us/azure/devops/pipelines/)
 - [AWS CDK Best Practices](https://docs.aws.amazon.com/cdk/v2/guide/best-practices.html)
+- [GitHub Actions Documentation](https://docs.github.com/en/actions)
+- [Azure DevOps Pipelines Documentation](https://docs.microsoft.com/en-us/azure/devops/pipelines/)
 - [DORA Metrics](https://www.devops-research.com/research.html)

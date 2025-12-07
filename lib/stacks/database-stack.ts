@@ -40,9 +40,11 @@ export class DatabaseStack extends cdk.Stack {
       serverlessV2MinCapacity: props.databaseConfig.minCapacity,
       serverlessV2MaxCapacity: props.databaseConfig.maxCapacity,
       writer: rds.ClusterInstance.serverlessV2('Writer'),
-      readers: [
-        rds.ClusterInstance.serverlessV2('Reader1', { scaleWithWriter: true }),
-      ],
+      readers: props.databaseConfig.readerInstances > 0
+        ? Array.from({ length: props.databaseConfig.readerInstances }, (_, i) =>
+            rds.ClusterInstance.serverlessV2(`Reader${i + 1}`, { scaleWithWriter: true })
+          )
+        : undefined,
       vpc: props.vpc,
       vpcSubnets: {
         subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
