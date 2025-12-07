@@ -1,321 +1,166 @@
 # Observability & Security Plan
 
-## Table of Contents
-- [Overview](#overview)
-- [Current Implementation](#current-implementation)
-  - [Monitoring & Logging](#monitoring--logging)
-  - [Security Controls](#security-controls)
-- [Security Gaps & Risks](#security-gaps--risks)
-- [Recommended Enhancements](#recommended-enhancements)
-  - [Security Services](#security-services)
-  - [Advanced Monitoring](#advanced-monitoring)
-- [References](#references)
+*Brief plan addressing monitoring/logging of key components (RDS, ECS, ALB) and security risk mitigations.*
 
-## Overview
+## Monitoring & Logging (Current Implementation)
 
-This plan addresses Part 3 of the infrastructure requirements: monitoring/logging of key components (RDS, ECS, ALB) and identifying security risks with proposed mitigations. The current deployment implements foundational observability and security controls, but lacks several AWS security services required for production-grade deployments.
+### Application Load Balancer
+- **Metrics**: CloudWatch automatically tracks request count, latency (p50/p90/p99), HTTP status codes, healthy/unhealthy target counts
+- **Access Logs**: Stored in S3 with 30-day lifecycle policy, contains client IP, request path, response codes, latency
+- **Key Metrics**: `TargetResponseTime`, `UnhealthyHostCount`, `HTTPCode_Target_5XX_Count`
 
-## Current Implementation
+### ECS Fargate Services
+- **Container Logs**: Streamed to CloudWatch Logs (`/aws/ecs/dev/backend`, `/aws/ecs/dev/frontend`)
+- **Log Format**: Structured JSON with timestamp, level, service name, message, and context fields
+- **Retention**: 7 days (dev), 90 days recommended (prod)
+- **Metrics**: CPU utilization, memory utilization, running task count, deployment status
+- **Auto-Scaling**: Configured to scale on CPU (80% threshold) and memory (85% threshold)
 
-### Monitoring & Logging
+### Aurora Serverless v2 (RDS)
+- **Database Logs**: PostgreSQL logs exported to CloudWatch (`/aws/rds/cluster/dev-auroracluster/postgresql`)
+- **Metrics**: ACU utilization, database connections, CPU%, read/write latency, storage usage
+- **Backups**: Automated with 7-day retention (dev), 35-day (prod)
+- **Encryption**: At-rest using KMS, in-transit via TLS 1.2+
 
-**Application Load Balancer (ALB):**
-- CloudWatch metrics automatically collected (request count, latency, HTTP status codes, healthy/unhealthy hosts)
-- Access logs stored in S3 bucket with 30-day lifecycle policy
-- Key metrics: `TargetResponseTime`, `UnhealthyHostCount`, `HTTPCode_Target_5XX_Count`
-- No alarms currently configured
+### Additional Components
+- **VPC Flow Logs**: Enabled, sent to CloudWatch Logs for network traffic analysis
+- **SQS**: Message count, age of oldest message, DLQ depth
+- **Lambda (Order Producer)**: Invocation count, duration, errors, throttles
 
-**ECS Fargate Services (Backend & Frontend):**
-- Container logs streamed to CloudWatch Logs at `/aws/ecs/dev/backend` and `/aws/ecs/dev/frontend`
-- Structured JSON logging for backend application (timestamp, level, service, message, context)
-- Log retention: 7 days (development), 90 days recommended for production
-- Metrics tracked: CPU utilization, memory utilization, running task count
-- Auto-scaling configured based on CPU/memory thresholds (80% CPU triggers scale-up)
+## Security Controls (Current Implementation)
 
-**Aurora Serverless v2 (RDS):**
-- PostgreSQL logs exported to CloudWatch at `/aws/rds/cluster/dev-auroracluster/postgresql`
-- Metrics monitored: ACU utilization, database connections, CPU utilization, read/write latency
-- Storage encrypted at rest using AWS KMS
-- Automated backups with 7-day retention (dev), 35-day retention (production)
-- No Performance Insights enabled (would add query-level visibility)
+### Network Security
+**Architecture**: ALB in public subnets (10.0.0.x/24), ECS and Aurora in private subnets (10.0.3.x/24) with no public IPs. NAT Gateways provide egress-only internet access.
 
-**Additional Logging:**
-- SQS queue metrics: message count, age of oldest message, DLQ message count
-- Lambda (order producer): invocation count, duration, errors, throttles
-- VPC Flow Logs: Not currently enabled (gap identified)
+**Security Groups**:
+- ALB: Inbound HTTP (80) from internet, outbound to backend/frontend
+- Backend: Inbound 3000 from ALB only, outbound to Aurora (5432) and AWS APIs (443)
+- Frontend: Inbound 80 from ALB only
+- Aurora: Inbound 5432 from VPC CIDR only
 
-**Monitoring Dashboard:**
+### Data Protection
+- **Encryption at Rest**: Aurora (KMS), SQS (SSE-SQS), Secrets Manager (KMS), S3 (SSE-S3)
+- **Encryption in Transit**: Aurora TLS 1.2+, AWS API calls over HTTPS
+- **Secrets Management**: Database credentials auto-generated, stored in Secrets Manager (never in code)
 
-The CloudWatch dashboard provides real-time visibility into system health with metrics aggregated from ALB (request rate, latency, error rates), ECS (task health, resource utilization), Aurora (capacity, connections, latency), and SQS (queue depth, processing lag). This gives operators a single-pane view of the entire order processing pipeline from ingress through data persistence.
+### Access Control
+- **IAM Least Privilege**: ECS task roles limited to specific SQS queues and Secrets Manager read-only
+- **WAF**: Configured with rate limiting (2000 requests/5min/IP), logging enabled in production
 
-### Security Controls
+### Application Security
+- **Input Validation**: Implemented in application code
+- **SQL Injection Prevention**: Parameterized queries with pg library
+- **Vulnerability Scanning**: npm audit in CI/CD pipeline
 
-**Network Segmentation:**
+## Security Risks & Mitigations
 
-The architecture follows a defense-in-depth approach with strict network isolation. Public subnets (10.0.0.x/24) host only the ALB, which serves as the single entry point. Private subnets (10.0.3.x/24) contain ECS tasks and Aurora with no public IP addresses or internet-facing endpoints. NAT Gateways provide egress-only internet access for software updates and AWS API calls. This design prevents direct access to compute and data layers while maintaining operational functionality.
+### 1. No Audit Trail of Infrastructure Changes
+**Risk**: Without CloudTrail, cannot determine who made infrastructure changes, when, or from where during security investigations.
 
-**Security Groups:**
-- ALB: Inbound HTTP (port 80) from 0.0.0.0/0, outbound to backend/frontend security groups
-- Backend: Inbound port 3000 from ALB only, outbound to Aurora (5432) and AWS services (443)
-- Frontend: Inbound port 80 from ALB only, outbound to internet for CDN/assets
-- Aurora: Inbound port 5432 from VPC CIDR (10.0.0.0/16) only, no outbound rules
+**Mitigation**: Enable CloudTrail by setting `enableCloudTrail: true` in `lib/config/environment-config.ts`. CloudTrail logs all API calls to S3 with encryption and log file validation.
 
-**Encryption:**
-- At-rest: Aurora (KMS), SQS (SSE-SQS), Secrets Manager (KMS), S3 (SSE-S3)
-- In-transit: Aurora connections require TLS 1.2+, AWS API calls over HTTPS
-- Limitation: ALB serves HTTP only (no SSL/TLS certificate configured)
+**Cost**: ~$2-5/month
 
-**IAM & Access Control:**
-- ECS task roles use least-privilege policies (specific SQS queues, read-only Secrets Manager)
-- Database credentials auto-generated and stored in Secrets Manager (never in code)
-- Secrets rotation: Manual (should be automated with Lambda rotation function)
+### 2. No Threat Detection
+**Risk**: Malicious activity (compromised credentials, crypto mining, data exfiltration, port scanning) goes undetected.
 
-**Application Security:**
-- WAF configured with rate limiting (2000 requests per 5 minutes per IP)
-- WAF logging disabled in dev (enabled in production config)
-- Input validation in application code
-- No SQL injection risk (parameterized queries with pg library)
+**Mitigation**: Enable GuardDuty (`enableGuardDuty: true`) for ML-based threat detection. Configure EventBridge to alert on HIGH/CRITICAL findings.
 
-**Vulnerability Management:**
-- NPM audit runs in CI/CD pipeline (informational, doesn't block deployment)
-- Container image scanning: Not implemented (Inspector v2 disabled)
-- Fargate automatically updates base OS images (no manual patching required)
+**Impact**: Reduces time-to-detect from months to hours.
 
-## Security Gaps & Risks
+**Cost**: ~$30-50/month
 
-**Critical Gap: Absence of AWS Security Services**
+### 3. No Compliance Monitoring
+**Risk**: Security misconfigurations (public S3 buckets, overly permissive security groups, unencrypted resources) are not automatically detected.
 
-The current deployment has all security services disabled in `lib/config/environment-config.ts`:
+**Mitigation**: Enable Security Hub (`enableSecurityHub: true`) with AWS Foundational Security Best Practices standard. Review weekly, remediate HIGH within 7 days.
 
-```typescript
-securityConfig: {
-  enableCloudTrail: false,   // No audit trail of API calls
-  enableGuardDuty: false,    // No threat detection
-  enableSecurityHub: false,  // No compliance scanning
-  enableInspector: false,    // No container vulnerability scanning
-  enableConfig: false,       // No resource configuration tracking
-}
-```
+**Cost**: ~$10-15/month
 
-This creates significant security risks:
+### 4. No Container Vulnerability Scanning
+**Risk**: Container images may contain known CVEs in OS packages or application dependencies.
 
-**1. No Audit Trail (CloudTrail Disabled)**
+**Mitigation**: Enable Inspector v2 (`enableInspector: true`) for continuous ECR image scanning. Configure CI/CD to block deployment of images with CRITICAL CVEs.
 
-*Risk:* Without CloudTrail, there's no record of who made changes to infrastructure, when, or from where. If a security incident occurs (compromised credentials, unauthorized changes, data breach), forensic investigation would be impossible.
+**Cost**: ~$10-15/month
 
-*Impact:*
-- Cannot detect unauthorized API calls or privilege escalation
-- No compliance audit trail for SOC 2, HIPAA, or PCI-DSS
-- Unable to correlate security events across services
-- No automated alerting on suspicious activity patterns
+### 5. No Configuration Change Tracking
+**Risk**: Cannot answer "who changed the security group rules last Tuesday?" or prove compliance state at a specific point in time.
 
-*Example Attack Scenario:* An attacker gains access to IAM credentials and deletes the Aurora database. Without CloudTrail, you cannot determine when it happened, which credentials were used, or if other resources were compromised.
+**Mitigation**: Enable AWS Config (`enableConfig: true`) to track resource configuration history. Create Config rules for tagging, encryption, and security group compliance.
 
-**2. No Threat Detection (GuardDuty Disabled)**
+**Cost**: ~$10-15/month
 
-*Risk:* GuardDuty analyzes VPC Flow Logs, DNS logs, and CloudTrail events for malicious activity using machine learning. Without it, threats go undetected until damage occurs.
+### 6. Limited Observability for Troubleshooting
+**Risk**: When requests fail or slow down, must manually correlate logs across ALB, ECS, and Aurora. Cannot visualize request flow or identify bottlenecks.
 
-*Threats Missed:*
-- Cryptocurrency mining on ECS tasks (unusual outbound connections)
-- Compromised EC2 instances communicating with known malware C&C servers
-- Data exfiltration to suspicious external IPs
-- Port scanning and reconnaissance activities
-- Compromised IAM credentials used from unusual locations
+**Mitigation**:
+- Enable AWS X-Ray for distributed tracing (shows request flow, latency breakdown, error correlation)
+- Enable RDS Performance Insights (query-level analysis, wait events, top SQL)
+- Configure CloudWatch Alarms for critical thresholds (unhealthy hosts, high CPU, database connections)
 
-*Impact:* Average time to detect a breach without GuardDuty: 280+ days (industry average). With GuardDuty: Minutes to hours.
+**Cost**: ~$5-10/month (X-Ray dev), free (Performance Insights 7-day retention)
 
-**3. No Compliance Monitoring (Security Hub Disabled)**
+### 7. No Cost Monitoring
+**Risk**: Unexpected cost spikes from misconfiguration or compromised accounts go undetected until monthly bill.
 
-*Risk:* Security Hub aggregates findings from GuardDuty, Inspector, and other sources while continuously checking against compliance standards (CIS AWS Foundations, NIST, PCI-DSS).
+**Mitigation**: Enable AWS Cost Anomaly Detection with $100 threshold for alerts.
 
-*Compliance Violations Undetected:*
-- S3 buckets with public access enabled
-- Security groups allowing unrestricted inbound access (0.0.0.0/0 on sensitive ports)
-- Unencrypted EBS volumes or snapshots
-- IAM users without MFA enabled
-- RDS snapshots shared publicly
+**Cost**: Free
 
-*Impact:* Failed audits, regulatory fines, certification delays. Security Hub provides a unified dashboard showing security posture score and prioritized remediation actions.
+### 8. HTTP-Only Load Balancer
+**Risk**: Traffic between clients and ALB is unencrypted (man-in-the-middle risk).
 
-**4. No Vulnerability Scanning (Inspector Disabled)**
+**Mitigation**: Provision ACM certificate, configure HTTPS listener on port 443, redirect HTTP→HTTPS, enforce TLS 1.2+.
 
-*Risk:* Container images and Lambda functions may contain known CVEs (Common Vulnerabilities and Exposures) in OS packages or application dependencies.
+**Cost**: Free (ACM)
 
-*Examples:*
-- Node.js application uses library with remote code execution vulnerability
-- Base Docker image contains outdated OpenSSL with known exploits
-- Lambda function dependencies have high-severity CVEs
+### 9. No Automated Alerting
+**Risk**: High CPU, memory exhaustion, unhealthy targets, or database connection failures don't trigger immediate alerts.
 
-*Impact:* Attackers exploit known vulnerabilities to gain container access, escalate privileges, or exfiltrate data. Inspector v2 provides continuous scanning that alerts within hours of new CVE publication.
+**Mitigation**: Create CloudWatch Alarms for:
+- ALB: `UnhealthyHostCount >= 1` (1min), `TargetResponseTime p99 > 2000ms` (5min)
+- ECS: `CPUUtilization > 80%` (5min), `RunningTaskCount < DesiredCount` (1min)
+- Aurora: `DatabaseConnections > 80%` (5min), `CPUUtilization > 80%` (5min)
+- SQS: `ApproximateAgeOfOldestMessage > 300s` (5min), DLQ depth > 0 (immediate)
 
-**5. No Configuration Management (AWS Config Disabled)**
+Send alerts to SNS topics for email/Slack integration.
 
-*Risk:* AWS Config tracks resource configuration changes over time and evaluates compliance with organizational rules.
+**Cost**: Free (within CloudWatch free tier)
 
-*Problems Without Config:*
-- Cannot answer "who changed the security group rules last Tuesday?"
-- No automated enforcement of tagging policies
-- Security group changes that expose databases go unnoticed
-- Cannot prove compliance state at a specific point in time
+## Production Requirements
 
-*Example:* A developer accidentally opens port 5432 to 0.0.0.0/0 on the Aurora security group. Without Config, this remains undetected until exploited.
-
-**6. No Distributed Tracing (X-Ray Disabled)**
-
-*Risk:* When requests fail or slow down, troubleshooting requires manual log correlation across ALB, ECS, and Aurora.
-
-*Operational Impact:*
-- Cannot visualize request flow through the system
-- Difficult to identify bottlenecks in multi-service architectures
-- No latency breakdown (how much time in database vs. application logic?)
-- Complex debugging for intermittent failures
-
-**7. Missing Cost Anomaly Detection**
-
-*Risk:* Unexpected cost spikes from resource misconfiguration, compromised accounts, or runaway auto-scaling go undetected until the monthly bill arrives.
-
-*Examples:*
-- Attacker uses compromised credentials to launch hundreds of EC2 instances for cryptocurrency mining
-- Bug causes infinite auto-scaling loop
-- Forgotten test resources running 24/7 in development account
-
-*Impact:* Without AWS Cost Anomaly Detection, you discover a $50,000 bill weeks after the incident when prevention would have cost $0.
-
-**Additional Risks:**
-
-- **No VPC Flow Logs:** Cannot investigate network-based attacks, detect port scanning, or analyze traffic patterns
-- **No HTTPS on ALB:** Traffic between clients and ALB is unencrypted (man-in-the-middle risk)
-- **Manual Secrets Rotation:** Database credentials never rotate (increased risk if compromised)
-- **No CloudWatch Alarms:** High CPU, memory exhaustion, or database connection failures don't trigger alerts
-- **Single Account:** No organizational structure with isolated accounts for dev/staging/prod (blast radius of compromise includes all environments)
-
-## Recommended Enhancements
-
-### Security Services
-
-**Phase 1: Foundation (Week 1)**
-
-Enable core security services by updating `lib/config/environment-config.ts`:
+To make this deployment production-ready, enable the following in `lib/config/environment-config.ts`:
 
 ```typescript
 securityConfig: {
-  enableCloudTrail: true,    // Audit all API calls
-  enableGuardDuty: true,     // Threat detection
-  enableSecurityHub: true,   // Compliance monitoring
-  enableInspector: true,     // Container vulnerability scanning
-  enableConfig: true,        // Configuration tracking
+  enableCloudTrail: true,    // Audit trail (compliance requirement)
+  enableGuardDuty: true,     // Threat detection (security requirement)
+  enableSecurityHub: true,   // Compliance scanning (audit requirement)
+  enableInspector: true,     // Vulnerability scanning (security requirement)
+  enableConfig: true,        // Configuration tracking (compliance requirement)
 }
 ```
 
-**Implementation:**
+**Total Additional Cost**: ~$65-100/month (production environment)
 
-1. **CloudTrail**: Create multi-region trail with log file validation, encrypt logs with KMS, store in S3 with lifecycle policy (90 days → Glacier → 7 years). Estimated cost: $2-5/month.
-
-2. **GuardDuty**: Enable with one click (no agents required). Configure EventBridge rule to send HIGH/CRITICAL findings to SNS topic for immediate alerting. Estimated cost: $30-50/month.
-
-3. **Security Hub**: Enable AWS Foundational Security Best Practices standard. Review findings weekly, remediate HIGH severity issues within 7 days, CRITICAL within 24 hours. Estimated cost: $10-15/month.
-
-4. **Inspector v2**: Enable ECR and Lambda scanning. Configure to block deployment of images with CRITICAL CVEs. Set up automated ticketing for HIGH severity findings. Estimated cost: $10-15/month.
-
-5. **AWS Config**: Track security group, IAM, RDS, and S3 bucket configurations. Create Config rules for required tags, encryption enforcement, and security group restrictions. Estimated cost: $10-15/month.
-
-**Phase 2: Advanced Protections (Week 2-3)**
-
-1. **VPC Flow Logs**: Enable for all VPCs, send to CloudWatch Logs. Log only rejected traffic to reduce costs (accepted traffic not typically useful for security analysis). Create metric filters for:
-   - Rejected traffic from known malicious IPs
-   - High volume of rejected traffic (port scanning detection)
-   - Unusual outbound traffic patterns
-
-2. **AWS Cost Anomaly Detection**: Configure with $100 threshold for alerts. Monitor EC2, ECS, RDS, and Lambda spending. Set up SNS notifications to finance and engineering teams.
-
-3. **CloudWatch Alarms**: Create alarms for critical thresholds:
-   - ALB: `UnhealthyHostCount >= 1` (1 minute), `TargetResponseTime p99 > 2000ms` (5 minutes)
-   - ECS: `CPUUtilization > 80%` (5 minutes), `RunningTaskCount < DesiredCount` (1 minute)
-   - Aurora: `DatabaseConnections > 80%` (5 minutes), `CPUUtilization > 80%` (5 minutes)
-   - SQS: `ApproximateAgeOfOldestMessage > 300s` (5 minutes), DLQ message count > 0 (immediate)
-
-4. **Secrets Rotation**: Enable automatic rotation for Aurora credentials (30-day cycle) using Lambda rotation function. Estimated cost: Negligible (few Lambda invocations per month).
-
-**Phase 3: Advanced Monitoring (Month 2)**
-
-1. **AWS X-Ray**: Enable distributed tracing for ECS services and Lambda. Instrument backend application with X-Ray SDK to trace:
-   - SQS message processing latency
-   - Database query performance
-   - API endpoint response times
-   - Error rates by service component
-
-   Benefits: Visualize request flow, identify bottlenecks, correlate errors across services. Estimated cost: $5-10/month (dev), $20-40/month (production).
-
-2. **RDS Performance Insights**: Enable 7-day retention. Provides database-level query analysis, wait event identification, and top SQL queries by resource consumption. Estimated cost: Free tier (7-day retention).
-
-3. **CloudWatch Contributor Insights**: Analyze ALB access logs to identify:
-   - Top IP addresses by request count (identify scrapers/bots)
-   - Most expensive API endpoints (high latency)
-   - Error patterns by user agent or geography
-
-4. **CloudWatch Anomaly Detection**: Create ML-powered alarms that detect unusual patterns in metrics (e.g., request count drops by 50%, CPU spikes outside normal range). Reduces false positives from static thresholds.
-
-**Phase 4: Production Hardening (Month 3)**
-
-1. **HTTPS/TLS**: Provision ACM certificate, configure ALB HTTPS listener (port 443), redirect HTTP → HTTPS, enforce TLS 1.2+. Configure security headers (HSTS, X-Frame-Options, CSP).
-
-2. **AWS WAF Enhanced Rules**: Add managed rule groups:
-   - Core Rule Set (OWASP Top 10 protection)
-   - Known Bad Inputs (SQL injection, XSS)
-   - IP Reputation Lists (known malicious sources)
-   - Bot Control (detect and block bots)
-
-3. **Multi-Account Strategy**: Use AWS Organizations to separate:
-   - Development account (isolated from production)
-   - Staging account (production-like environment)
-   - Production account (restricted access, MFA required)
-   - Security/audit account (centralized logging, read-only access)
-
-   Benefits: Reduces blast radius of compromised credentials, enforces environment isolation, enables different security controls per environment.
-
-4. **Automated Remediation**: Create EventBridge rules with Lambda functions to auto-remediate common security findings:
-   - Security group opened to 0.0.0.0/0 → automatically revert change
-   - S3 bucket public access enabled → automatically re-enable block public access
-   - Unencrypted resource created → tag for remediation or auto-delete
-
-### Advanced Monitoring
-
-**Centralized Logging (Optional):**
-
-For multi-account deployments, aggregate all logs in a central security account using CloudWatch cross-account log subscriptions or AWS Security Lake. This provides unified search across all environments and prevents log tampering by compromised accounts.
-
-**Third-Party SIEM Integration:**
-
-Export CloudWatch Logs, CloudTrail, and Security Hub findings to enterprise SIEM platforms (Splunk, Datadog, Sumo Logic) for:
-- Correlation with non-AWS security events
-- Advanced threat hunting and analytics
-- Long-term log retention (7+ years)
-- Compliance reporting (SOC 2, ISO 27001)
-
-**Incident Response Automation:**
-
-Use EventBridge to trigger automated incident response workflows:
-- GuardDuty finding → Lambda → Quarantine compromised instance (isolate security group)
-- Inspector critical CVE → Lambda → Roll back ECS task definition to previous version
-- Cost anomaly detected → Lambda → Send detailed report with resource recommendations
+**Additional Recommendations**:
+1. Create monitoring stack with CloudWatch Alarms (alarms exist in code, stack needs creation)
+2. Enable AWS X-Ray distributed tracing
+3. Enable RDS Performance Insights (free for 7-day retention)
+4. Configure HTTPS with ACM certificate
+5. Implement automated secrets rotation (30-day cycle)
+6. Set up multi-account structure (dev/staging/prod isolation)
+7. Enable AWS Cost Anomaly Detection
+8. Configure SNS topics for alert notifications
+9. Create runbooks for common incident scenarios
+10. Schedule quarterly security reviews and penetration testing
 
 ## References
 
-### Implementation Guides
 - [AWS Security Best Practices](https://docs.aws.amazon.com/prescriptive-guidance/latest/security-reference-architecture/)
 - [CloudWatch Alarms Best Practices](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/Best_Practice_Recommended_Alarms_AWS_Services.html)
-- [GuardDuty Getting Started](https://docs.aws.amazon.com/guardduty/latest/ug/guardduty_settingup.html)
-- [Security Hub Standards](https://docs.aws.amazon.com/securityhub/latest/userguide/securityhub-standards.html)
-- [Inspector v2 Container Scanning](https://docs.aws.amazon.com/inspector/latest/user/scanning-ecr.html)
-- [AWS X-Ray Tracing](https://docs.aws.amazon.com/xray/latest/devguide/xray-concepts.html)
-
-### Compliance Frameworks
-- [CIS AWS Foundations Benchmark](https://www.cisecurity.org/benchmark/amazon_web_services)
-- [NIST Cybersecurity Framework](https://www.nist.gov/cyberframework)
 - [AWS Well-Architected Security Pillar](https://docs.aws.amazon.com/wellarchitected/latest/security-pillar/welcome.html)
-
-### Internal Documentation
-- `lib/config/environment-config.ts` - Security service configuration flags
-- `lib/stacks/monitoring-stack.ts` - CloudWatch alarms and dashboards (not yet implemented)
-- `docs/cicd-strategy.md` - NPM audit in CI/CD pipeline
-- `README.md` - Current monitoring dashboard description
+- Internal: `lib/config/environment-config.ts` - Security service configuration flags
+- Internal: `lib/stacks/network-stack.ts` - VPC Flow Logs implementation
+- Internal: `lib/stacks/waf-stack.ts` - WAF rate limiting configuration
