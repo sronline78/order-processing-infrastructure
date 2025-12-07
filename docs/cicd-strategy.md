@@ -167,26 +167,24 @@ main (production-ready)
 
 ### Database Migrations
 
-**Recommended Approach:** Use a dedicated Lambda function for schema migrations:
+**Current Implementation (Development):**
 
-```typescript
-// lambda/db-migrations/index.ts
-import { SecretsManager } from '@aws-sdk/client-secrets-manager';
-import { Pool } from 'pg';
+For the development environment, database schema is automatically managed on application startup using `CREATE TABLE IF NOT EXISTS` statements in `app/backend/src/database.ts:95-130`. When the backend container starts, it automatically:
+- Creates the `orders` table if it doesn't exist
+- Creates indexes for performance (created_at, customer_id)
+- Uses idempotent SQL statements safe for multiple runs
 
-export async function handler(event: any) {
-  // 1. Retrieve database credentials from Secrets Manager
-  // 2. Connect to Aurora PostgreSQL
-  // 3. Run migrations from S3 or embedded
-  // 4. Return success/failure
-}
-```
+This approach is suitable for development but not recommended for production as it doesn't provide version control or rollback capabilities.
 
-The Lambda function is deployed via CDK with VPC access to Aurora and granted read permissions on the database secret. The pipeline invokes the Lambda after infrastructure deployment to apply schema changes.
+**Production-Ready Approaches:**
 
-**Alternative Approach:** Run migrations as an ECS Fargate task before application deployment using `aws ecs run-task` and wait for completion.
+Two recommended approaches for production database migrations:
 
-**Production Best Practice:** Always perform manual review of migration scripts, dry-run in staging, create database backups, and document rollback procedures.
+1. **Lambda Function Approach:** Deploy a dedicated Lambda function with VPC access to Aurora. The function retrieves credentials from Secrets Manager, runs versioned migration scripts, and tracks applied versions in a `schema_migrations` table. The pipeline invokes the Lambda after infrastructure deployment.
+
+2. **ECS Migration Task:** Run migrations as an ECS Fargate task before application deployment using `aws ecs run-task`. This approach uses the same container image but overrides the command to run migration scripts. See `docs/azure-devops-setup-guide.md` for detailed implementation with example migration runner code.
+
+**Best Practices:** Manual review of migration scripts, dry-run in staging, database backups before production migrations, version tracking, transactional migrations, and documented rollback procedures.
 
 ### Secret Management
 
