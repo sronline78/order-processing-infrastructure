@@ -1,860 +1,321 @@
-# Observability and Security Plan
-
-## Executive Summary
-
-This document outlines the comprehensive observability and security strategy for the Order Processing Infrastructure. The plan emphasizes **defense in depth**, **continuous monitoring**, and **proactive threat detection** while maintaining operational visibility across all system components.
-
----
+# Observability & Security Plan
 
 ## Table of Contents
+- [Overview](#overview)
+- [Current Implementation](#current-implementation)
+  - [Monitoring & Logging](#monitoring--logging)
+  - [Security Controls](#security-controls)
+- [Security Gaps & Risks](#security-gaps--risks)
+- [Recommended Enhancements](#recommended-enhancements)
+  - [Security Services](#security-services)
+  - [Advanced Monitoring](#advanced-monitoring)
+- [References](#references)
 
-1. [Logging Strategy](#logging-strategy)
-2. [Metrics and Monitoring](#metrics-and-monitoring)
-3. [Alerting Strategy](#alerting-strategy)
-4. [Security Architecture](#security-architecture)
-5. [Threat Detection](#threat-detection)
-6. [Compliance and Audit](#compliance-and-audit)
-7. [Incident Response](#incident-response)
-8. [Cost Optimization](#cost-optimization)
+## Overview
 
----
+This plan addresses Part 3 of the infrastructure requirements: monitoring/logging of key components (RDS, ECS, ALB) and identifying security risks with proposed mitigations. The current deployment implements foundational observability and security controls, but lacks several AWS security services required for production-grade deployments.
 
-## Logging Strategy
+## Current Implementation
 
-### Centralized Logging Architecture
+### Monitoring & Logging
 
-All logs are aggregated in **Amazon CloudWatch Logs** with structured log groups for easy querying and analysis.
+**Application Load Balancer (ALB):**
+- CloudWatch metrics automatically collected (request count, latency, HTTP status codes, healthy/unhealthy hosts)
+- Access logs stored in S3 bucket with 30-day lifecycle policy
+- Key metrics: `TargetResponseTime`, `UnhealthyHostCount`, `HTTPCode_Target_5XX_Count`
+- No alarms currently configured
 
-#### Log Group Naming Convention
+**ECS Fargate Services (Backend & Frontend):**
+- Container logs streamed to CloudWatch Logs at `/aws/ecs/dev/backend` and `/aws/ecs/dev/frontend`
+- Structured JSON logging for backend application (timestamp, level, service, message, context)
+- Log retention: 7 days (development), 90 days recommended for production
+- Metrics tracked: CPU utilization, memory utilization, running task count
+- Auto-scaling configured based on CPU/memory thresholds (80% CPU triggers scale-up)
 
-```
-/aws/{service}/{environment}/{resource}
-```
+**Aurora Serverless v2 (RDS):**
+- PostgreSQL logs exported to CloudWatch at `/aws/rds/cluster/dev-auroracluster/postgresql`
+- Metrics monitored: ACU utilization, database connections, CPU utilization, read/write latency
+- Storage encrypted at rest using AWS KMS
+- Automated backups with 7-day retention (dev), 35-day retention (production)
+- No Performance Insights enabled (would add query-level visibility)
 
-Examples:
-- `/aws/ecs/dev/backend` - Backend container logs
-- `/aws/ecs/dev/frontend` - Frontend container logs
-- `/aws/lambda/dev/order-producer` - Lambda function logs
-- `/aws/rds/cluster/dev-auroracluster/postgresql` - Aurora PostgreSQL logs
-- `/aws/vpc/flowlogs/dev` - VPC Flow Logs
+**Additional Logging:**
+- SQS queue metrics: message count, age of oldest message, DLQ message count
+- Lambda (order producer): invocation count, duration, errors, throttles
+- VPC Flow Logs: Not currently enabled (gap identified)
 
-#### Log Retention Policy
+**Monitoring Dashboard:**
 
-| Environment | Retention Period | Rationale |
-|-------------|------------------|-----------|
-| Development | 7 days           | Cost optimization, rapid iteration |
-| Staging     | 30 days          | Extended testing period |
-| Production  | 90 days          | Compliance, audit trail, debugging |
+The CloudWatch dashboard provides real-time visibility into system health with metrics aggregated from ALB (request rate, latency, error rates), ECS (task health, resource utilization), Aurora (capacity, connections, latency), and SQS (queue depth, processing lag). This gives operators a single-pane view of the entire order processing pipeline from ingress through data persistence.
 
-#### Log Sources
+### Security Controls
 
-##### 1. Application Logs (ECS Fargate)
+**Network Segmentation:**
 
-**Backend Service:**
-```json
-{
-  "timestamp": "2025-12-06T06:42:00Z",
-  "level": "INFO",
-  "service": "order-processor-backend",
-  "message": "Processed order",
-  "orderId": "order-123",
-  "customerId": "customer-456",
-  "processingTime": 245,
-  "sqsMessageId": "abc-def-123"
+The architecture follows a defense-in-depth approach with strict network isolation. Public subnets (10.0.0.x/24) host only the ALB, which serves as the single entry point. Private subnets (10.0.3.x/24) contain ECS tasks and Aurora with no public IP addresses or internet-facing endpoints. NAT Gateways provide egress-only internet access for software updates and AWS API calls. This design prevents direct access to compute and data layers while maintaining operational functionality.
+
+**Security Groups:**
+- ALB: Inbound HTTP (port 80) from 0.0.0.0/0, outbound to backend/frontend security groups
+- Backend: Inbound port 3000 from ALB only, outbound to Aurora (5432) and AWS services (443)
+- Frontend: Inbound port 80 from ALB only, outbound to internet for CDN/assets
+- Aurora: Inbound port 5432 from VPC CIDR (10.0.0.0/16) only, no outbound rules
+
+**Encryption:**
+- At-rest: Aurora (KMS), SQS (SSE-SQS), Secrets Manager (KMS), S3 (SSE-S3)
+- In-transit: Aurora connections require TLS 1.2+, AWS API calls over HTTPS
+- Limitation: ALB serves HTTP only (no SSL/TLS certificate configured)
+
+**IAM & Access Control:**
+- ECS task roles use least-privilege policies (specific SQS queues, read-only Secrets Manager)
+- Database credentials auto-generated and stored in Secrets Manager (never in code)
+- Secrets rotation: Manual (should be automated with Lambda rotation function)
+
+**Application Security:**
+- WAF configured with rate limiting (2000 requests per 5 minutes per IP)
+- WAF logging disabled in dev (enabled in production config)
+- Input validation in application code
+- No SQL injection risk (parameterized queries with pg library)
+
+**Vulnerability Management:**
+- NPM audit runs in CI/CD pipeline (informational, doesn't block deployment)
+- Container image scanning: Not implemented (Inspector v2 disabled)
+- Fargate automatically updates base OS images (no manual patching required)
+
+## Security Gaps & Risks
+
+**Critical Gap: Absence of AWS Security Services**
+
+The current deployment has all security services disabled in `lib/config/environment-config.ts`:
+
+```typescript
+securityConfig: {
+  enableCloudTrail: false,   // No audit trail of API calls
+  enableGuardDuty: false,    // No threat detection
+  enableSecurityHub: false,  // No compliance scanning
+  enableInspector: false,    // No container vulnerability scanning
+  enableConfig: false,       // No resource configuration tracking
 }
 ```
 
-**Logging Configuration:**
-- JSON structured logging for easy parsing
-- Correlation IDs for request tracing
-- AWS X-Ray integration for distributed tracing
+This creates significant security risks:
 
-**Frontend Service:**
-- nginx access logs
-- Error logs for failed requests
-- Client IP addresses (anonymized for GDPR)
+**1. No Audit Trail (CloudTrail Disabled)**
 
-##### 2. Database Logs (Aurora PostgreSQL)
+*Risk:* Without CloudTrail, there's no record of who made changes to infrastructure, when, or from where. If a security incident occurs (compromised credentials, unauthorized changes, data breach), forensic investigation would be impossible.
 
-**Enabled Log Types:**
-- `postgresql` - Query logs, errors, slow queries
+*Impact:*
+- Cannot detect unauthorized API calls or privilege escalation
+- No compliance audit trail for SOC 2, HIPAA, or PCI-DSS
+- Unable to correlate security events across services
+- No automated alerting on suspicious activity patterns
 
-**Slow Query Threshold:** 1000ms
+*Example Attack Scenario:* An attacker gains access to IAM credentials and deletes the Aurora database. Without CloudTrail, you cannot determine when it happened, which credentials were used, or if other resources were compromised.
 
-**Log Configuration:**
-```sql
-ALTER DATABASE orders SET log_min_duration_statement = 1000;
-ALTER DATABASE orders SET log_connections = 'on';
-ALTER DATABASE orders SET log_disconnections = 'on';
-```
+**2. No Threat Detection (GuardDuty Disabled)**
 
-##### 3. VPC Flow Logs
+*Risk:* GuardDuty analyzes VPC Flow Logs, DNS logs, and CloudTrail events for malicious activity using machine learning. Without it, threats go undetected until damage occurs.
 
-**Purpose:** Network traffic analysis, security investigation
+*Threats Missed:*
+- Cryptocurrency mining on ECS tasks (unusual outbound connections)
+- Compromised EC2 instances communicating with known malware C&C servers
+- Data exfiltration to suspicious external IPs
+- Port scanning and reconnaissance activities
+- Compromised IAM credentials used from unusual locations
 
-**Format:**
-```
-${srcaddr} ${dstaddr} ${srcport} ${dstport} ${protocol} ${packets} ${bytes} ${start} ${end} ${action} ${log-status}
-```
+*Impact:* Average time to detect a breach without GuardDuty: 280+ days (industry average). With GuardDuty: Minutes to hours.
 
-**Retention:** 7 days (dev), 90 days (prod)
+**3. No Compliance Monitoring (Security Hub Disabled)**
 
-**Delivery:** CloudWatch Logs (real-time analysis)
+*Risk:* Security Hub aggregates findings from GuardDuty, Inspector, and other sources while continuously checking against compliance standards (CIS AWS Foundations, NIST, PCI-DSS).
 
-##### 4. Lambda Logs
+*Compliance Violations Undetected:*
+- S3 buckets with public access enabled
+- Security groups allowing unrestricted inbound access (0.0.0.0/0 on sensitive ports)
+- Unencrypted EBS volumes or snapshots
+- IAM users without MFA enabled
+- RDS snapshots shared publicly
 
-**Order Producer Function:**
-- Invocation count
-- Orders generated per execution
-- SQS send success/failure
-- Execution duration
+*Impact:* Failed audits, regulatory fines, certification delays. Security Hub provides a unified dashboard showing security posture score and prioritized remediation actions.
 
-##### 5. Load Balancer Access Logs
+**4. No Vulnerability Scanning (Inspector Disabled)**
 
-**ALB Access Logs:**
-- Stored in S3 bucket: `order-processing-alb-logs-{account-id}`
-- Lifecycle policy: Delete after 30 days
-- Contains: Client IP, request path, response code, latency
+*Risk:* Container images and Lambda functions may contain known CVEs (Common Vulnerabilities and Exposures) in OS packages or application dependencies.
 
----
+*Examples:*
+- Node.js application uses library with remote code execution vulnerability
+- Base Docker image contains outdated OpenSSL with known exploits
+- Lambda function dependencies have high-severity CVEs
 
-## Metrics and Monitoring
+*Impact:* Attackers exploit known vulnerabilities to gain container access, escalate privileges, or exfiltrate data. Inspector v2 provides continuous scanning that alerts within hours of new CVE publication.
 
-### CloudWatch Metrics Dashboard
+**5. No Configuration Management (AWS Config Disabled)**
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Order Processing System - Dev Environment                  │
-├─────────────────────────────────────────────────────────────┤
-│                                                               │
-│  Application Load Balancer                                   │
-│  ├─ Request Count (sum): 1,234 req/min                       │
-│  ├─ Target Response Time (avg): 125ms                        │
-│  ├─ Unhealthy Hosts (max): 0                                 │
-│  └─ 4XX/5XX Errors (sum): 12 / 2                             │
-│                                                               │
-│  ECS Services                                                 │
-│  ├─ Backend Tasks: 2/2 running                               │
-│  │   ├─ CPU Utilization: 35%                                 │
-│  │   └─ Memory Utilization: 52%                              │
-│  └─ Frontend Tasks: 2/2 running                              │
-│      ├─ CPU Utilization: 18%                                 │
-│      └─ Memory Utilization: 28%                              │
-│                                                               │
-│  Aurora Serverless v2                                         │
-│  ├─ ACU Utilization: 0.8 / 2.0                               │
-│  ├─ Database Connections: 24                                 │
-│  ├─ CPU Utilization: 22%                                     │
-│  └─ Read/Write Latency: 12ms / 18ms                          │
-│                                                               │
-│  SQS Queue                                                    │
-│  ├─ Messages Visible: 5                                      │
-│  ├─ Messages In Flight: 2                                    │
-│  ├─ Age of Oldest Message: 15s                               │
-│  └─ DLQ Messages: 0                                           │
-│                                                               │
-│  Lambda Function (Order Producer)                            │
-│  ├─ Invocations (5min): 1                                    │
-│  ├─ Duration (avg): 3,245ms                                  │
-│  ├─ Errors: 0                                                 │
-│  └─ Throttles: 0                                              │
-│                                                               │
-└─────────────────────────────────────────────────────────────┘
-```
+*Risk:* AWS Config tracks resource configuration changes over time and evaluates compliance with organizational rules.
 
-### Key Metrics by Component
+*Problems Without Config:*
+- Cannot answer "who changed the security group rules last Tuesday?"
+- No automated enforcement of tagging policies
+- Security group changes that expose databases go unnoticed
+- Cannot prove compliance state at a specific point in time
 
-#### Application Load Balancer
+*Example:* A developer accidentally opens port 5432 to 0.0.0.0/0 on the Aurora security group. Without Config, this remains undetected until exploited.
 
-| Metric                     | Threshold      | Alert |
-|----------------------------|----------------|-------|
-| UnhealthyHostCount         | > 0            | P1    |
-| TargetResponseTime (p99)   | > 2000ms       | P2    |
-| HTTPCode_Target_5XX_Count  | > 10/5min      | P2    |
-| HTTPCode_Target_4XX_Count  | > 50/5min      | P3    |
-| RequestCount               | < 1/5min (prod)| P3    |
+**6. No Distributed Tracing (X-Ray Disabled)**
 
-#### ECS Services
+*Risk:* When requests fail or slow down, troubleshooting requires manual log correlation across ALB, ECS, and Aurora.
 
-| Metric                | Threshold | Alert | Action |
-|-----------------------|-----------|-------|--------|
-| CPUUtilization        | > 80%     | P2    | Auto-scale up |
-| MemoryUtilization     | > 85%     | P2    | Auto-scale up |
-| Running Tasks         | < Desired | P1    | Investigate |
-| Task Stop Reason      | Any       | P2    | Log analysis |
+*Operational Impact:*
+- Cannot visualize request flow through the system
+- Difficult to identify bottlenecks in multi-service architectures
+- No latency breakdown (how much time in database vs. application logic?)
+- Complex debugging for intermittent failures
 
-#### Aurora Serverless v2
+**7. Missing Cost Anomaly Detection**
 
-| Metric                | Threshold    | Alert |
-|-----------------------|--------------|-------|
-| CPUUtilization        | > 80%        | P2    |
-| DatabaseConnections   | > 80% max    | P2    |
-| FreeableMemory        | < 512 MB     | P3    |
-| ReadLatency           | > 100ms      | P3    |
-| WriteLatency          | > 100ms      | P3    |
-| ServerlessDatabaseCapacity | > 1.8 ACU | P3  |
+*Risk:* Unexpected cost spikes from resource misconfiguration, compromised accounts, or runaway auto-scaling go undetected until the monthly bill arrives.
 
-#### SQS Queue
+*Examples:*
+- Attacker uses compromised credentials to launch hundreds of EC2 instances for cryptocurrency mining
+- Bug causes infinite auto-scaling loop
+- Forgotten test resources running 24/7 in development account
 
-| Metric                              | Threshold  | Alert | Meaning |
-|-------------------------------------|------------|-------|---------|
-| ApproximateAgeOfOldestMessage       | > 300s     | P2    | Processing lag |
-| ApproximateNumberOfMessagesVisible  | > 100      | P3    | Backlog growing |
-| NumberOfMessagesSent                | 0 (30min)  | P3    | Producer failure |
-| ApproximateNumberOfMessagesInDLQ    | > 0        | P1    | Repeated failures |
+*Impact:* Without AWS Cost Anomaly Detection, you discover a $50,000 bill weeks after the incident when prevention would have cost $0.
 
-### Custom Application Metrics
+**Additional Risks:**
 
-**Using CloudWatch Embedded Metric Format (EMF):**
+- **No VPC Flow Logs:** Cannot investigate network-based attacks, detect port scanning, or analyze traffic patterns
+- **No HTTPS on ALB:** Traffic between clients and ALB is unencrypted (man-in-the-middle risk)
+- **Manual Secrets Rotation:** Database credentials never rotate (increased risk if compromised)
+- **No CloudWatch Alarms:** High CPU, memory exhaustion, or database connection failures don't trigger alerts
+- **Single Account:** No organizational structure with isolated accounts for dev/staging/prod (blast radius of compromise includes all environments)
+
+## Recommended Enhancements
+
+### Security Services
+
+**Phase 1: Foundation (Week 1)**
+
+Enable core security services by updating `lib/config/environment-config.ts`:
 
 ```typescript
-// Backend application metrics
-const metrics = {
-  _aws: {
-    Timestamp: Date.now(),
-    CloudWatchMetrics: [{
-      Namespace: 'OrderProcessing/Application',
-      Dimensions: [['Environment', 'Service']],
-      Metrics: [
-        { Name: 'OrdersProcessed', Unit: 'Count' },
-        { Name: 'OrderProcessingDuration', Unit: 'Milliseconds' },
-        { Name: 'DatabaseQueryDuration', Unit: 'Milliseconds' },
-        { Name: 'SQSPollDuration', Unit: 'Milliseconds' },
-      ]
-    }]
-  },
-  Environment: 'dev',
-  Service: 'backend',
-  OrdersProcessed: 1,
-  OrderProcessingDuration: 245,
-  DatabaseQueryDuration: 42,
-  SQSPollDuration: 15,
-  OrderId: 'order-123',
-  CustomerId: 'customer-456'
-};
-
-console.log(JSON.stringify(metrics));
-```
-
-**Available Custom Metrics:**
-- `OrdersProcessed` - Counter, total orders processed
-- `OrderProcessingDuration` - Histogram, time to process order (ms)
-- `DatabaseQueryDuration` - Histogram, DB query time (ms)
-- `SQSPollDuration` - Histogram, SQS long polling time (ms)
-- `APIRequestDuration` - Histogram, API endpoint response time (ms)
-
----
-
-## Alerting Strategy
-
-### SNS Topics
-
-#### 1. Infrastructure Alerts (`order-processing-infrastructure-alerts`)
-
-**Subscribers:**
-- Email: `devops-team@example.com`
-- Slack: `#infrastructure-alerts`
-- PagerDuty: Production only
-
-**Priority Levels:**
-- **P1 (Critical)**: Immediate action required, service down
-- **P2 (High)**: Degraded performance, potential outage
-- **P3 (Warning)**: Approaching limits, proactive action needed
-
-#### 2. Security Alerts (`order-processing-security-alerts`)
-
-**Subscribers:**
-- Email: `security-team@example.com`
-- Slack: `#security-alerts`
-- SIEM: Splunk/DataDog integration
-
-**Filtered Events:**
-- HIGH/CRITICAL severity only
-- Source: Security Hub, GuardDuty
-- EventBridge rule filters non-actionable findings
-
-### CloudWatch Alarms Configuration
-
-#### Example: Backend Service CPU Alarm
-
-```typescript
-new cloudwatch.Alarm(this, 'BackendCPUAlarm', {
-  metric: backendService.metricCpuUtilization(),
-  threshold: 80,
-  evaluationPeriods: 2,
-  datapointsToAlarm: 2,
-  comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
-  treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-  alarmDescription: 'Backend service CPU > 80% for 2 consecutive periods',
-  alarmName: 'dev-backend-cpu-high',
-  actionsEnabled: true,
-});
-
-alarm.addAlarmAction(new cloudwatch_actions.SnsAction(infrastructureAlertsTopic));
-```
-
-#### Critical Alarms (P1)
-
-| Alarm Name                | Metric                     | Threshold | Duration |
-|---------------------------|----------------------------|-----------|----------|
-| ALB-No-Healthy-Targets    | UnhealthyHostCount         | >= 1      | 1 min    |
-| Backend-All-Tasks-Down    | RunningTaskCount           | = 0       | 1 min    |
-| Frontend-All-Tasks-Down   | RunningTaskCount           | = 0       | 1 min    |
-| Database-Unavailable      | DatabaseConnections        | = 0       | 2 min    |
-| DLQ-Messages-Detected     | ApproximateNumberOfMessages| > 0       | 1 min    |
-
-#### High Priority Alarms (P2)
-
-| Alarm Name                | Metric                     | Threshold | Duration |
-|---------------------------|----------------------------|-----------|----------|
-| ALB-High-Latency          | TargetResponseTime (p99)   | > 2000ms  | 5 min    |
-| Backend-High-CPU          | CPUUtilization             | > 80%     | 5 min    |
-| Backend-High-Memory       | MemoryUtilization          | > 85%     | 5 min    |
-| Database-High-CPU         | CPUUtilization             | > 80%     | 5 min    |
-| SQS-High-Age              | ApproximateAgeOfOldestMsg  | > 300s    | 5 min    |
-| ALB-5XX-Errors            | HTTPCode_Target_5XX_Count  | > 10      | 5 min    |
-
-### Alert Routing Logic
-
-```
-┌─────────────────┐
-│  CloudWatch     │
-│  Alarm          │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  SNS Topic      │
-│  (Infrastructure)│
-└────────┬────────┘
-         │
-         ├──────────────────────────────────────┐
-         │                                      │
-         ▼                                      ▼
-┌─────────────────┐                   ┌─────────────────┐
-│  Email          │                   │  Slack Channel  │
-│  (All Alerts)   │                   │  (Formatted)    │
-└─────────────────┘                   └─────────────────┘
-         │                                      │
-         │ (P1 only in prod)                   │
-         ▼                                      ▼
-┌─────────────────┐                   ┌─────────────────┐
-│  PagerDuty      │                   │  Lambda         │
-│  (Oncall)       │                   │  (Auto-remediate)│
-└─────────────────┘                   └─────────────────┘
-```
-
----
-
-## Security Architecture
-
-### Defense in Depth Layers
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Layer 7: Application Security                              │
-│  - Input validation, SQL injection prevention               │
-│  - CORS policies, Content Security Policy                   │
-│  - Rate limiting (future: AWS WAF)                           │
-└─────────────────────────────────────────────────────────────┘
-                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Layer 6: Authentication & Authorization                     │
-│  - IAM roles and policies (least privilege)                 │
-│  - Task roles for ECS (scoped permissions)                  │
-│  - Secrets Manager for credentials                          │
-└─────────────────────────────────────────────────────────────┘
-                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Layer 5: Network Segmentation                               │
-│  - Private subnets for compute and database                 │
-│  - Security groups (deny by default)                        │
-│  - NACLs for additional defense                             │
-└─────────────────────────────────────────────────────────────┘
-                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Layer 4: Data Encryption                                    │
-│  - TLS 1.2+ for all connections                             │
-│  - At-rest encryption (KMS for Aurora, SSE for SQS/S3)      │
-│  - Secrets Manager encryption                               │
-└─────────────────────────────────────────────────────────────┘
-                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Layer 3: Vulnerability Management                           │
-│  - ECR image scanning (Inspector v2)                        │
-│  - OS patching (Fargate auto-updates base images)           │
-│  - Dependency scanning (npm audit in CI/CD)                 │
-└─────────────────────────────────────────────────────────────┘
-                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Layer 2: Threat Detection                                   │
-│  - GuardDuty (behavioral threat detection)                  │
-│  - Security Hub (CSPM - compliance scanning)                │
-│  - VPC Flow Logs (network traffic analysis)                 │
-└─────────────────────────────────────────────────────────────┘
-                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Layer 1: Audit & Compliance                                 │
-│  - CloudTrail (all API calls logged)                        │
-│  - AWS Config (resource change tracking)                    │
-│  - Compliance frameworks (NIST, CIS benchmarks)             │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### Network Security
-
-#### Security Group Architecture
-
-**ALB Security Group:**
-```
-Inbound:
-  - Port 80 (HTTP) from 0.0.0.0/0
-  - (Future: Port 443 HTTPS from 0.0.0.0/0)
-
-Outbound:
-  - All traffic (needed to reach backend/frontend)
-```
-
-**Backend Security Group:**
-```
-Inbound:
-  - Port 3000 from ALB Security Group only
-
-Outbound:
-  - Port 5432 to Database Security Group
-  - Port 443 to 0.0.0.0/0 (AWS APIs: Secrets Manager, SQS, S3)
-```
-
-**Frontend Security Group:**
-```
-Inbound:
-  - Port 80 from ALB Security Group only
-
-Outbound:
-  - Port 443 to 0.0.0.0/0 (CDN, external resources)
-```
-
-**Database Security Group:**
-```
-Inbound:
-  - Port 5432 from VPC CIDR block (10.0.0.0/16)
-
-Outbound:
-  - None required (database doesn't initiate connections)
-```
-
-#### Private Subnet Architecture
-
-```
-┌────────────────────────────────────────────────────────┐
-│  Public Subnet (ALB only)                              │
-│  10.0.0.0/24, 10.0.1.0/24, 10.0.2.0/24                 │
-│  ├─ Internet Gateway (ingress/egress)                  │
-│  └─ Application Load Balancer                          │
-└────────────────────────────────────────────────────────┘
-                       ▼
-┌────────────────────────────────────────────────────────┐
-│  Private Subnet (ECS + Aurora)                         │
-│  10.0.3.0/24, 10.0.4.0/24, 10.0.5.0/24                 │
-│  ├─ NAT Gateway (egress only for updates)              │
-│  ├─ ECS Fargate Tasks (backend + frontend)             │
-│  └─ Aurora PostgreSQL (no public endpoint)             │
-└────────────────────────────────────────────────────────┘
-```
-
-**Key Security Benefits:**
-- ECS and Aurora have **no public IP addresses**
-- Internet access only through NAT Gateways (egress only)
-- ALB acts as single entry point
-- Cross-zone redundancy for high availability
-
-### Data Encryption
-
-#### At Rest
-
-| Resource          | Encryption Method           | Key Management |
-|-------------------|-----------------------------|----------------|
-| Aurora PostgreSQL | AES-256                     | AWS KMS        |
-| SQS Queue         | SSE-SQS                     | AWS managed    |
-| Secrets Manager   | AES-256                     | AWS KMS        |
-| S3 (ALB logs)     | SSE-S3                      | AWS managed    |
-| EBS (Fargate)     | AES-256                     | AWS managed    |
-| CloudWatch Logs   | AES-256                     | AWS managed    |
-
-**KMS Key Policy Example:**
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Sid": "Enable IAM User Permissions",
-    "Effect": "Allow",
-    "Principal": {
-      "AWS": "arn:aws:iam::211125316068:root"
-    },
-    "Action": "kms:*",
-    "Resource": "*"
-  }, {
-    "Sid": "Allow Aurora to use the key",
-    "Effect": "Allow",
-    "Principal": {
-      "Service": "rds.amazonaws.com"
-    },
-    "Action": [
-      "kms:Decrypt",
-      "kms:GenerateDataKey"
-    ],
-    "Resource": "*",
-    "Condition": {
-      "StringEquals": {
-        "kms:ViaService": "rds.us-east-1.amazonaws.com"
-      }
-    }
-  }]
+securityConfig: {
+  enableCloudTrail: true,    // Audit all API calls
+  enableGuardDuty: true,     // Threat detection
+  enableSecurityHub: true,   // Compliance monitoring
+  enableInspector: true,     // Container vulnerability scanning
+  enableConfig: true,        // Configuration tracking
 }
 ```
 
-#### In Transit
-
-- **ALB → Backend/Frontend:** HTTP (within VPC, considered secure)
-  - Future: Configure service mesh (AWS App Mesh) for mTLS
-- **Backend → Aurora:** TLS 1.2+ enforced
-  - PostgreSQL connection string includes `sslmode=require`
-- **Backend → SQS:** HTTPS only
-- **Backend → Secrets Manager:** HTTPS only
-- **Client → ALB:** HTTP (future: HTTPS with ACM certificate)
-
-### IAM Least Privilege
-
-#### Backend Task Role Permissions
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "sqs:ReceiveMessage",
-        "sqs:DeleteMessage",
-        "sqs:GetQueueAttributes"
-      ],
-      "Resource": "arn:aws:sqs:us-east-1:211125316068:orders-queue"
-    },
-    {
-      "Effect": "Allow",
-      "Action": [
-        "sqs:SendMessage"
-      ],
-      "Resource": "arn:aws:sqs:us-east-1:211125316068:orders-queue"
-    },
-    {
-      "Effect": "Allow",
-      "Action": [
-        "secretsmanager:GetSecretValue"
-      ],
-      "Resource": "arn:aws:secretsmanager:us-east-1:211125316068:secret:dev-DatabaseStack-*"
-    }
-  ]
-}
-```
-
-**Key Principles:**
-- ✅ Only specific SQS actions (not `sqs:*`)
-- ✅ Resource-specific ARNs (not `*`)
-- ✅ Read-only Secrets Manager access
-- ✅ No write access to database secrets
-- ✅ No access to other AWS services
-
-#### Execution Role Permissions
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Action": [
-      "ecr:GetAuthorizationToken",
-      "ecr:BatchCheckLayerAvailability",
-      "ecr:GetDownloadUrlForLayer",
-      "ecr:BatchGetImage"
-    ],
-    "Resource": "*"
-  }, {
-    "Effect": "Allow",
-    "Action": [
-      "logs:CreateLogStream",
-      "logs:PutLogEvents"
-    ],
-    "Resource": "arn:aws:logs:us-east-1:211125316068:log-group:/aws/ecs/dev/*"
-  }]
-}
-```
-
-**Purpose:**
-- ECR image pull during task startup
-- CloudWatch Logs write access
-
----
-
-## Threat Detection
-
-### AWS GuardDuty
-
-**Enabled Protections:**
-- EC2 Protection (Fargate instances)
-- S3 Protection (ALB access logs)
-- RDS Protection (Aurora)
-- Lambda Protection (order producer)
-- Malware Protection (future: for uploaded files)
-
-**Sample Threats Detected:**
-- Cryptocurrency mining
-- Unusual API call patterns
-- Compromised credentials usage
-- Port scanning/probing
-- Data exfiltration attempts
-
-**Finding Severity:**
-- **HIGH/CRITICAL**: Sent to security SNS topic immediately
-- **MEDIUM**: Daily summary email
-- **LOW/INFORMATIONAL**: Aggregated weekly report
-
-### AWS Security Hub
-
-**Enabled Standards:**
-- **AWS Foundational Security Best Practices (FSBP)**
-- **CIS AWS Foundations Benchmark v1.4.0**
-
-**Sample Checks:**
-- EC2.2: VPC default security group should not allow inbound/outbound traffic
-- RDS.1: RDS snapshots should be private
-- S3.1: S3 Block Public Access should be enabled
-- IAM.3: IAM users' access keys should be rotated every 90 days
-- CloudTrail.1: CloudTrail should be enabled and configured
-
-**EventBridge Integration:**
-```typescript
-new events.Rule(this, 'SecurityFindingsRule', {
-  eventPattern: {
-    source: ['aws.securityhub'],
-    detailType: ['Security Hub Findings - Imported'],
-    detail: {
-      findings: {
-        Severity: { Label: ['HIGH', 'CRITICAL'] },
-        Workflow: { Status: ['NEW', 'NOTIFIED'] }
-      }
-    }
-  },
-  targets: [new targets.SnsTopic(securityAlertsTopic)]
-});
-```
-
-### AWS Inspector v2
-
-**Scanned Resources:**
-- ECR container images (backend, frontend)
-- Lambda functions (order producer)
-
-**Vulnerability Types:**
-- CVEs in OS packages
-- CVEs in language libraries (npm, Python)
-- Network reachability issues
-
-**Continuous Scanning:**
-- New images scanned automatically on push
-- Existing images rescanned when new CVEs published
-- Findings exported to Security Hub
-
----
-
-## Compliance and Audit
-
-### AWS CloudTrail
-
-**Configuration:**
-- Multi-region trail enabled
-- Management events logged
-- Data events for S3 buckets (future)
-- Log file validation enabled (integrity)
-- Logs encrypted with KMS
-- S3 bucket: `order-processing-cloudtrail-{account-id}`
-- Lifecycle: Transition to Glacier after 90 days, delete after 7 years
-
-**Sample Events Logged:**
-- ECS task starts/stops
-- IAM role assumptions
-- Secrets Manager access
-- RDS snapshots
-- Security group modifications
-
-### AWS Config
-
-**Monitored Resources:**
-- EC2 Security Groups
-- RDS Instances
-- SQS Queues
-- IAM Roles/Policies
-- S3 Buckets
-
-**Config Rules (Examples):**
-```
-- required-tags: All resources must have Environment and Project tags
-- encrypted-volumes: All EBS volumes must be encrypted
-- rds-snapshots-public-prohibited: RDS snapshots must be private
-- vpc-sg-open-only-to-authorized-ports: Security groups follow standards
-```
-
-**Configuration Snapshots:**
-- Frequency: Every 6 hours
-- Retention: 7 years
-- Delivery: S3 bucket
-
----
-
-## Incident Response
-
-### Runbooks
-
-#### 1. Backend Service Down (All Tasks Unhealthy)
-
-```bash
-# Step 1: Check ECS service status
-aws ecs describe-services --cluster order-processing-cluster --services order-processor-backend
-
-# Step 2: Check recent task failures
-aws ecs describe-tasks --cluster order-processing-cluster --tasks $(aws ecs list-tasks --cluster order-processing-cluster --service-name order-processor-backend --desired-status STOPPED --query 'taskArns[0]' --output text)
-
-# Step 3: View container logs
-aws logs tail /aws/ecs/dev/backend --follow --since 10m
-
-# Step 4: Check recent deployments
-aws ecs describe-services --cluster order-processing-cluster --services order-processor-backend --query 'services[0].deployments'
-
-# Step 5: Rollback if needed (update to previous task definition)
-aws ecs update-service --cluster order-processing-cluster --service order-processor-backend --task-definition backend-task-def:42
-```
-
-#### 2. Database Connection Failures
-
-```bash
-# Step 1: Check Aurora cluster status
-aws rds describe-db-clusters --db-cluster-identifier dev-databasestack-auroracluster
-
-# Step 2: Check security group rules
-aws ec2 describe-security-groups --group-ids sg-xxx
-
-# Step 3: Test connectivity from ECS task
-aws ecs execute-command --cluster order-processing-cluster --task <task-arn> --container Backend --interactive --command "/bin/sh"
-# Then: nc -zv <aurora-endpoint> 5432
-
-# Step 4: Check Secrets Manager secret
-aws secretsmanager get-secret-value --secret-id <secret-arn>
-
-# Step 5: Review Aurora logs
-aws rds describe-db-log-files --db-instance-identifier writer-instance
-```
-
-#### 3. SQS Messages Stuck in Queue
-
-```bash
-# Step 1: Check queue attributes
-aws sqs get-queue-attributes --queue-url https://sqs.us-east-1.amazonaws.com/211125316068/orders-queue --attribute-names All
-
-# Step 2: Inspect DLQ
-aws sqs receive-message --queue-url https://sqs.us-east-1.amazonaws.com/211125316068/orders-dlq --max-number-of-messages 10
-
-# Step 3: Check backend service scaling
-aws application-autoscaling describe-scalable-targets --service-namespace ecs --resource-ids service/order-processing-cluster/order-processor-backend
-
-# Step 4: Manual scale-up if needed
-aws ecs update-service --cluster order-processing-cluster --service order-processor-backend --desired-count 5
-```
-
-### Security Incident Response Plan
-
-**Phase 1: Detection and Analysis (15 minutes)**
-1. Security Hub/GuardDuty finding received
-2. Triage severity and impact
-3. Identify affected resources
-4. Collect initial logs and evidence
-
-**Phase 2: Containment (30 minutes)**
-1. Isolate affected resources (update security groups)
-2. Rotate compromised credentials
-3. Block malicious IPs (future: AWS WAF)
-4. Preserve logs and snapshots for forensics
-
-**Phase 3: Eradication (1-4 hours)**
-1. Identify root cause
-2. Remove malicious code/artifacts
-3. Patch vulnerabilities
-4. Deploy security updates
-
-**Phase 4: Recovery (2-8 hours)**
-1. Restore services from known-good state
-2. Monitor for re-infection
-3. Verify system integrity
-4. Resume normal operations
-
-**Phase 5: Post-Incident (1 week)**
-1. Conduct post-mortem
-2. Update security controls
-3. Document lessons learned
-4. Implement preventive measures
-
----
-
-## Cost Optimization
-
-### Monitoring Costs
-
-| Service              | Dev (Monthly) | Prod (Monthly) |
-|----------------------|---------------|----------------|
-| CloudWatch Logs      | $5-10         | $50-100        |
-| CloudWatch Metrics   | $3-5          | $10-20         |
-| VPC Flow Logs        | $2-5          | $10-20         |
-| GuardDuty            | $0 (trial)    | $30-50         |
-| Security Hub         | $0 (trial)    | $10-15         |
-| Inspector v2         | $2-5          | $10-15         |
-| Config               | $2-5          | $10-15         |
-| CloudTrail           | $2            | $2             |
-| **Total**            | **$16-37**    | **$132-237**   |
-
-### Cost Optimization Strategies
-
-1. **Log Retention:** Reduce retention for non-critical logs
-2. **Metric Resolution:** Use 1-minute resolution only for critical metrics
-3. **VPC Flow Logs Filtering:** Log only rejected traffic (not all)
-4. **GuardDuty:** Disable for development environments
-5. **Security Hub:** Use FSBP only, disable CIS if not required
-6. **S3 Lifecycle Policies:** Archive CloudTrail logs to Glacier
-
-**Example: Optimized VPC Flow Logs**
-```typescript
-new ec2.FlowLog(this, 'VPCFlowLogs', {
-  resourceType: ec2.FlowLogResourceType.fromVpc(vpc),
-  destination: ec2.FlowLogDestination.toCloudWatchLogs(logGroup),
-  trafficType: ec2.FlowLogTrafficType.REJECT, // Only log rejected traffic
-});
-```
-
----
-
-## Summary
-
-This observability and security strategy provides:
-
-✅ **Comprehensive Logging:** All components emit structured logs
-✅ **Proactive Monitoring:** 20+ CloudWatch alarms covering all critical metrics
-✅ **Defense in Depth:** 7 layers of security controls
-✅ **Threat Detection:** GuardDuty, Security Hub, Inspector v2
-✅ **Audit Trail:** CloudTrail + Config track all changes
-✅ **Incident Response:** Documented runbooks for common scenarios
-✅ **Cost Awareness:** Monitoring costs tracked and optimized
-
-**Next Steps:**
-1. Enable AWS WAF for application-layer protection
-2. Implement centralized SIEM (Splunk, DataDog, or AWS Security Lake)
-3. Add X-Ray distributed tracing for request flow visibility
-4. Automate remediation with EventBridge + Lambda
-5. Conduct quarterly security assessments and penetration tests
+**Implementation:**
+
+1. **CloudTrail**: Create multi-region trail with log file validation, encrypt logs with KMS, store in S3 with lifecycle policy (90 days → Glacier → 7 years). Estimated cost: $2-5/month.
+
+2. **GuardDuty**: Enable with one click (no agents required). Configure EventBridge rule to send HIGH/CRITICAL findings to SNS topic for immediate alerting. Estimated cost: $30-50/month.
+
+3. **Security Hub**: Enable AWS Foundational Security Best Practices standard. Review findings weekly, remediate HIGH severity issues within 7 days, CRITICAL within 24 hours. Estimated cost: $10-15/month.
+
+4. **Inspector v2**: Enable ECR and Lambda scanning. Configure to block deployment of images with CRITICAL CVEs. Set up automated ticketing for HIGH severity findings. Estimated cost: $10-15/month.
+
+5. **AWS Config**: Track security group, IAM, RDS, and S3 bucket configurations. Create Config rules for required tags, encryption enforcement, and security group restrictions. Estimated cost: $10-15/month.
+
+**Phase 2: Advanced Protections (Week 2-3)**
+
+1. **VPC Flow Logs**: Enable for all VPCs, send to CloudWatch Logs. Log only rejected traffic to reduce costs (accepted traffic not typically useful for security analysis). Create metric filters for:
+   - Rejected traffic from known malicious IPs
+   - High volume of rejected traffic (port scanning detection)
+   - Unusual outbound traffic patterns
+
+2. **AWS Cost Anomaly Detection**: Configure with $100 threshold for alerts. Monitor EC2, ECS, RDS, and Lambda spending. Set up SNS notifications to finance and engineering teams.
+
+3. **CloudWatch Alarms**: Create alarms for critical thresholds:
+   - ALB: `UnhealthyHostCount >= 1` (1 minute), `TargetResponseTime p99 > 2000ms` (5 minutes)
+   - ECS: `CPUUtilization > 80%` (5 minutes), `RunningTaskCount < DesiredCount` (1 minute)
+   - Aurora: `DatabaseConnections > 80%` (5 minutes), `CPUUtilization > 80%` (5 minutes)
+   - SQS: `ApproximateAgeOfOldestMessage > 300s` (5 minutes), DLQ message count > 0 (immediate)
+
+4. **Secrets Rotation**: Enable automatic rotation for Aurora credentials (30-day cycle) using Lambda rotation function. Estimated cost: Negligible (few Lambda invocations per month).
+
+**Phase 3: Advanced Monitoring (Month 2)**
+
+1. **AWS X-Ray**: Enable distributed tracing for ECS services and Lambda. Instrument backend application with X-Ray SDK to trace:
+   - SQS message processing latency
+   - Database query performance
+   - API endpoint response times
+   - Error rates by service component
+
+   Benefits: Visualize request flow, identify bottlenecks, correlate errors across services. Estimated cost: $5-10/month (dev), $20-40/month (production).
+
+2. **RDS Performance Insights**: Enable 7-day retention. Provides database-level query analysis, wait event identification, and top SQL queries by resource consumption. Estimated cost: Free tier (7-day retention).
+
+3. **CloudWatch Contributor Insights**: Analyze ALB access logs to identify:
+   - Top IP addresses by request count (identify scrapers/bots)
+   - Most expensive API endpoints (high latency)
+   - Error patterns by user agent or geography
+
+4. **CloudWatch Anomaly Detection**: Create ML-powered alarms that detect unusual patterns in metrics (e.g., request count drops by 50%, CPU spikes outside normal range). Reduces false positives from static thresholds.
+
+**Phase 4: Production Hardening (Month 3)**
+
+1. **HTTPS/TLS**: Provision ACM certificate, configure ALB HTTPS listener (port 443), redirect HTTP → HTTPS, enforce TLS 1.2+. Configure security headers (HSTS, X-Frame-Options, CSP).
+
+2. **AWS WAF Enhanced Rules**: Add managed rule groups:
+   - Core Rule Set (OWASP Top 10 protection)
+   - Known Bad Inputs (SQL injection, XSS)
+   - IP Reputation Lists (known malicious sources)
+   - Bot Control (detect and block bots)
+
+3. **Multi-Account Strategy**: Use AWS Organizations to separate:
+   - Development account (isolated from production)
+   - Staging account (production-like environment)
+   - Production account (restricted access, MFA required)
+   - Security/audit account (centralized logging, read-only access)
+
+   Benefits: Reduces blast radius of compromised credentials, enforces environment isolation, enables different security controls per environment.
+
+4. **Automated Remediation**: Create EventBridge rules with Lambda functions to auto-remediate common security findings:
+   - Security group opened to 0.0.0.0/0 → automatically revert change
+   - S3 bucket public access enabled → automatically re-enable block public access
+   - Unencrypted resource created → tag for remediation or auto-delete
+
+### Advanced Monitoring
+
+**Centralized Logging (Optional):**
+
+For multi-account deployments, aggregate all logs in a central security account using CloudWatch cross-account log subscriptions or AWS Security Lake. This provides unified search across all environments and prevents log tampering by compromised accounts.
+
+**Third-Party SIEM Integration:**
+
+Export CloudWatch Logs, CloudTrail, and Security Hub findings to enterprise SIEM platforms (Splunk, Datadog, Sumo Logic) for:
+- Correlation with non-AWS security events
+- Advanced threat hunting and analytics
+- Long-term log retention (7+ years)
+- Compliance reporting (SOC 2, ISO 27001)
+
+**Incident Response Automation:**
+
+Use EventBridge to trigger automated incident response workflows:
+- GuardDuty finding → Lambda → Quarantine compromised instance (isolate security group)
+- Inspector critical CVE → Lambda → Roll back ECS task definition to previous version
+- Cost anomaly detected → Lambda → Send detailed report with resource recommendations
+
+## References
+
+### Implementation Guides
+- [AWS Security Best Practices](https://docs.aws.amazon.com/prescriptive-guidance/latest/security-reference-architecture/)
+- [CloudWatch Alarms Best Practices](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/Best_Practice_Recommended_Alarms_AWS_Services.html)
+- [GuardDuty Getting Started](https://docs.aws.amazon.com/guardduty/latest/ug/guardduty_settingup.html)
+- [Security Hub Standards](https://docs.aws.amazon.com/securityhub/latest/userguide/securityhub-standards.html)
+- [Inspector v2 Container Scanning](https://docs.aws.amazon.com/inspector/latest/user/scanning-ecr.html)
+- [AWS X-Ray Tracing](https://docs.aws.amazon.com/xray/latest/devguide/xray-concepts.html)
+
+### Compliance Frameworks
+- [CIS AWS Foundations Benchmark](https://www.cisecurity.org/benchmark/amazon_web_services)
+- [NIST Cybersecurity Framework](https://www.nist.gov/cyberframework)
+- [AWS Well-Architected Security Pillar](https://docs.aws.amazon.com/wellarchitected/latest/security-pillar/welcome.html)
+
+### Internal Documentation
+- `lib/config/environment-config.ts` - Security service configuration flags
+- `lib/stacks/monitoring-stack.ts` - CloudWatch alarms and dashboards (not yet implemented)
+- `docs/cicd-strategy.md` - NPM audit in CI/CD pipeline
+- `README.md` - Current monitoring dashboard description
