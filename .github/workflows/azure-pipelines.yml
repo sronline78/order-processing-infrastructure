@@ -107,40 +107,42 @@ stages:
             displayName: 'Publish CDK artifacts'
 
       # Build Docker images for backend and frontend (optional - can also build during deployment)
-      - job: Docker_Build
-        displayName: 'Build Docker Images'
-        dependsOn: CDK_Build_Test  # Run sequentially to avoid parallelism limits
-        pool:
-          vmImage: 'ubuntu-latest'
-        steps:
-          # Install Docker Buildx
-          - script: |
-              docker buildx create --use
-            displayName: 'Setup Docker Buildx'
+      # COMMENTED OUT: To avoid parallelism limits on free tier
+      # Docker images will be built during CDK deployment instead
+      # - job: Docker_Build
+      #   displayName: 'Build Docker Images'
+      #   dependsOn: CDK_Build_Test  # Run sequentially to avoid parallelism limits
+      #   pool:
+      #     vmImage: 'ubuntu-latest'
+      #   steps:
+      #     # Install Docker Buildx
+      #     - script: |
+      #         docker buildx create --use
+      #       displayName: 'Setup Docker Buildx'
 
-          # Build backend Docker image
-          - task: Docker@2
-            inputs:
-              command: 'build'
-              Dockerfile: 'app/backend/Dockerfile'
-              buildContext: 'app/backend'
-              tags: |
-                $(Build.BuildId)
-                latest
-              arguments: '--platform linux/amd64'
-            displayName: 'Build Backend Docker Image'
+      #     # Build backend Docker image
+      #     - task: Docker@2
+      #       inputs:
+      #         command: 'build'
+      #         Dockerfile: 'app/backend/Dockerfile'
+      #         buildContext: 'app/backend'
+      #         tags: |
+      #           $(Build.BuildId)
+      #           latest
+      #         arguments: '--platform linux/amd64'
+      #       displayName: 'Build Backend Docker Image'
 
-          # Build frontend Docker image
-          - task: Docker@2
-            inputs:
-              command: 'build'
-              Dockerfile: 'app/frontend/Dockerfile'
-              buildContext: 'app/frontend'
-              tags: |
-                $(Build.BuildId)
-                latest
-              arguments: '--platform linux/amd64'
-            displayName: 'Build Frontend Docker Image'
+      #     # Build frontend Docker image
+      #     - task: Docker@2
+      #       inputs:
+      #         command: 'build'
+      #         Dockerfile: 'app/frontend/Dockerfile'
+      #         buildContext: 'app/frontend'
+      #         tags: |
+      #           $(Build.BuildId)
+      #           latest
+      #         arguments: '--platform linux/amd64'
+      #       displayName: 'Build Frontend Docker Image'
 
   #############################################################################
   # DEPLOY TO DEV ENVIRONMENT
@@ -354,43 +356,44 @@ stages:
   # SECURITY SCANNING (Optional)
   # Runs on all branches
   # Scans for security vulnerabilities and compliance issues
+  # COMMENTED OUT: To avoid parallelism limits on free tier
   #############################################################################
-  - stage: Security_Scan
-    displayName: 'Security Scanning'
-    dependsOn: Build_And_Test  # Run sequentially to avoid parallelism limits
-    condition: succeeded()
-    jobs:
-      - job: npm_audit
-        displayName: 'NPM Audit'
-        pool:
-          vmImage: 'ubuntu-latest'
-        steps:
-          - task: NodeTool@0
-            inputs:
-              versionSpec: $(NODE_VERSION)
-            displayName: 'Install Node.js'
+  # - stage: Security_Scan
+  #   displayName: 'Security Scanning'
+  #   dependsOn: Build_And_Test  # Run sequentially to avoid parallelism limits
+  #   condition: succeeded()
+  #   jobs:
+  #     - job: npm_audit
+  #       displayName: 'NPM Audit'
+  #       pool:
+  #         vmImage: 'ubuntu-latest'
+  #       steps:
+  #         - task: NodeTool@0
+  #           inputs:
+  #             versionSpec: $(NODE_VERSION)
+  #           displayName: 'Install Node.js'
 
-          - script: |
-              npm ci
-              npm audit --audit-level=moderate || true
-            displayName: 'Run NPM audit'
-            continueOnError: true
+  #         - script: |
+  #             npm ci
+  #             npm audit --audit-level=moderate || true
+  #           displayName: 'Run NPM audit'
+  #           continueOnError: true
 
-      - job: cdk_nag
-        displayName: 'CDK NAG Security Checks'
-        dependsOn: npm_audit  # Run sequentially to avoid parallelism limits
-        pool:
-          vmImage: 'ubuntu-latest'
-        steps:
-          - task: NodeTool@0
-            inputs:
-              versionSpec: $(NODE_VERSION)
-            displayName: 'Install Node.js'
+  #     - job: cdk_nag
+  #       displayName: 'CDK NAG Security Checks'
+  #       dependsOn: npm_audit  # Run sequentially to avoid parallelism limits
+  #       pool:
+  #         vmImage: 'ubuntu-latest'
+  #       steps:
+  #         - task: NodeTool@0
+  #           inputs:
+  #             versionSpec: $(NODE_VERSION)
+  #           displayName: 'Install Node.js'
 
-          - script: |
-              npm ci
-              # If cdk-nag is installed, run security checks
-              npx cdk synth --all 2>&1 | tee cdk-synth.log || true
-              echo "CDK synthesis completed. Check logs for cdk-nag warnings."
-            displayName: 'CDK NAG checks'
-            continueOnError: true
+  #         - script: |
+  #             npm ci
+  #             # If cdk-nag is installed, run security checks
+  #             npx cdk synth --all 2>&1 | tee cdk-synth.log || true
+  #             echo "CDK synthesis completed. Check logs for cdk-nag warnings."
+  #           displayName: 'CDK NAG checks'
+  #           continueOnError: true
