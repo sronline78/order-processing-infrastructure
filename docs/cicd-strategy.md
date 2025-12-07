@@ -1,12 +1,137 @@
-# CI/CD Strategy: Azure DevOps Pipeline
+# CI/CD Strategy
 
 ## Overview
 
-This document outlines the CI/CD strategy for the Order Processing Infrastructure using **Azure DevOps Pipelines**. The pipeline automates testing, building, and deployment of both the infrastructure (AWS CDK) and applications (Docker containers).
+This document outlines the CI/CD strategy for the Order Processing Infrastructure. The project currently uses **GitHub Actions** for automated CI/CD, with **Azure DevOps** support also available as an alternative.
 
-## Pipeline Architecture
+### Active Platform: GitHub Actions
 
-### Multi-Stage Pipeline Design
+The project is actively using GitHub Actions (`.github/workflows/ci-cd.yml`) for all CI/CD operations. GitHub Actions provides:
+- Immediate access without parallelism approval requirements
+- Built-in secrets management
+- Seamless GitHub integration
+- Free tier with generous limits for public repositories
+
+### Alternative Platform: Azure DevOps
+
+Azure DevOps pipeline configuration is available in `azure-pipelines.yml` for teams that prefer Azure DevOps. Setup instructions are in [docs/azure-devops-setup-guide.md](./azure-devops-setup-guide.md).
+
+**Note:** Azure DevOps free tier requires parallelism grant approval, which can take 2-3 business days.
+
+## GitHub Actions Pipeline (Active)
+
+### Workflow Architecture
+
+The GitHub Actions workflow (`.github/workflows/ci-cd.yml`) implements a multi-job pipeline:
+
+```
+┌─────────────────────┐
+│  Build & Test       │  - Install dependencies
+│                     │  - Lint TypeScript code
+│                     │  - Run 59 unit tests
+│                     │  - CDK synth
+│                     │  - Publish artifacts
+└──────────┬──────────┘
+           │
+           ├──────────────────────┬─────────────────────┐
+           │                      │                     │
+           ▼                      ▼                     ▼
+┌──────────────────┐  ┌──────────────────┐  ┌─────────────────┐
+│ Build Docker     │  │ Security Scan    │  │                 │
+│ Images           │  │                  │  │                 │
+│ - Backend        │  │ - NPM Audit      │  │                 │
+│ - Frontend       │  │ - CDK NAG        │  │                 │
+└──────────┬───────┘  └────────┬─────────┘  │                 │
+           │                   │             │                 │
+           └───────────┬───────┘             │                 │
+                       │                     │                 │
+                       ▼                     │                 │
+            ┌──────────────────┐             │                 │
+            │  Deploy to Dev   │             │                 │
+            │  (develop only)  │             │                 │
+            │  - NetworkStack  │             │                 │
+            │  - DatabaseStack │             │                 │
+            │  - MessagingStack│             │                 │
+            │  - AppStack      │             │                 │
+            │  - Verify Health │             │                 │
+            └──────────────────┘             │                 │
+```
+
+### GitHub Actions Workflow Configuration
+
+**Trigger Conditions:**
+- Push to `main` or `develop` branches
+- Pull requests to `main` or `develop` branches
+- Excludes: README.md, docs/**, .gitignore
+
+**Jobs:**
+
+1. **build-and-test** (Required, runs always)
+   - Checkout code
+   - Setup Node.js 18.x with npm cache
+   - Install dependencies
+   - Lint code (`npm run lint`)
+   - Run unit tests with coverage
+   - Configure AWS credentials
+   - CDK synth
+   - Upload CDK artifacts
+   - Publish test results and code coverage
+
+2. **build-docker** (Depends on build-and-test)
+   - Setup Docker Buildx
+   - Build backend image (linux/amd64)
+   - Build frontend image (linux/amd64)
+   - Use GitHub Actions cache for layers
+
+3. **security-scan** (Depends on build-and-test)
+   - Run NPM audit for vulnerabilities
+   - Run CDK NAG security checks
+   - Continue on error (informational)
+
+4. **deploy-dev** (Depends on all above, develop branch only)
+   - Download CDK artifacts
+   - Configure AWS credentials from GitHub Secrets
+   - Deploy stacks sequentially:
+     - dev-NetworkStack
+     - dev-DatabaseStack
+     - dev-MessagingStack
+     - dev-ApplicationStack
+   - Verify deployment (ECS health, ALB URL)
+   - Set deployment URL in environment
+
+**GitHub Secrets Required:**
+- `AWS_ACCESS_KEY_ID` - AWS access key for deployment
+- `AWS_SECRET_ACCESS_KEY` - AWS secret access key for deployment
+
+**GitHub Environments:**
+- `development` - Auto-deployment for develop branch
+- `production` - Manual approval required (commented out, no prod account)
+
+### GitHub Actions Best Practices
+
+1. **Secrets Management**
+   - AWS credentials stored as GitHub Secrets (encrypted)
+   - Secrets never exposed in logs (automatically redacted)
+   - Scoped to repository only
+
+2. **Caching Strategy**
+   - NPM packages cached by setup-node action
+   - Docker layer caching via GitHub Actions cache
+   - Reduces build time by ~30%
+
+3. **Parallel Execution**
+   - Docker build and security scan run in parallel
+   - Maximizes pipeline efficiency
+   - Total time: ~13 minutes for full deployment
+
+4. **Artifact Management**
+   - CDK CloudFormation templates uploaded as artifacts
+   - Retained for 7 days
+   - Available for download and auditing
+
+## Azure DevOps Pipeline (Alternative)
+
+### Pipeline Architecture
 
 ```
 ┌─────────────────┐

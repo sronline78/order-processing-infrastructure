@@ -657,33 +657,49 @@ See [docs/cicd-strategy.md](./docs/cicd-strategy.md#database-migration-strategy)
 
 ## CI/CD
 
-### Azure DevOps Pipeline
+This project uses **GitHub Actions** for automated CI/CD, with Azure DevOps support also available.
 
-This project includes a complete Azure DevOps pipeline configuration for automated testing and deployment.
+### GitHub Actions (Active)
 
-**Pipeline Stages:**
+The project is currently using GitHub Actions for all CI/CD operations.
 
-1. **Build Stage**
+**Pipeline Workflow** (`.github/workflows/ci-cd.yml`):
+
+1. **Build & Test**
    - Install dependencies
-   - Run ESLint for code quality
-   - Execute unit tests with coverage reporting
+   - Lint TypeScript code
+   - Execute 59 unit tests with coverage reporting
    - CDK synth to validate CloudFormation templates
    - Publish test results and artifacts
 
-2. **Deploy to Development**
-   - Triggered automatically on `develop` branch
-   - Build and push Docker images to ECR
-   - Deploy infrastructure with CDK
-   - Run deployment verification tests
+2. **Build Docker Images**
+   - Build backend and frontend containers
+   - Validate multi-platform support (linux/amd64)
+   - Cache layers for faster builds
 
-3. **Deploy to Production**
-   - Triggered on `main` branch
-   - Requires manual approval (4-eyes principle)
-   - Build and tag production images
-   - Deploy to production environment
-   - Run smoke tests
+3. **Security Scanning**
+   - NPM audit for dependency vulnerabilities
+   - CDK NAG security checks
 
-See [docs/cicd-strategy.md](./docs/cicd-strategy.md) for complete pipeline documentation and setup instructions.
+4. **Deploy to Development**
+   - Triggered automatically on push to `develop` branch
+   - Deploy all CDK stacks sequentially
+   - Verify ECS services and ALB health
+   - Total deployment time: ~13 minutes
+
+**GitHub Secrets Configuration:**
+- `AWS_ACCESS_KEY_ID` - AWS access key for deployment
+- `AWS_SECRET_ACCESS_KEY` - AWS secret key for deployment
+
+### Azure DevOps (Alternative)
+
+Azure DevOps pipeline configuration is also available in `azure-pipelines.yml`.
+
+**Setup Instructions:** See [docs/azure-devops-setup-guide.md](./docs/azure-devops-setup-guide.md)
+
+**Note:** Azure DevOps free tier requires parallelism approval. GitHub Actions provides immediate access without approval requirements.
+
+See [docs/cicd-strategy.md](./docs/cicd-strategy.md) for complete pipeline documentation and CI/CD strategy.
 
 ### Local Development Workflow
 
