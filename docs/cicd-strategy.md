@@ -60,6 +60,66 @@ The pipeline implements a four-job workflow that runs on every push to the devel
 
 The entire pipeline completes in approximately 13 minutes from commit to deployed infrastructure.
 
+### Pipeline Flow Diagram
+
+```mermaid
+flowchart TB
+    %% Styling
+    classDef trigger fill:#7AA116,stroke:#232F3E,stroke-width:2px,color:#fff
+    classDef build fill:#3B48CC,stroke:#232F3E,stroke-width:2px,color:#fff
+    classDef security fill:#D13212,stroke:#232F3E,stroke-width:2px,color:#fff
+    classDef deploy fill:#FF9900,stroke:#232F3E,stroke-width:2px,color:#232F3E
+    classDef success fill:#1D8102,stroke:#232F3E,stroke-width:2px,color:#fff
+
+    %% Source Control
+    GitPush([Git Push]):::trigger
+    BranchCheck{Branch?}:::trigger
+
+    %% Build & Test Stage
+    subgraph BuildTest[Build & Test Stage]
+        Install[npm ci<br/>Install dependencies]:::build
+        Lint[npm run lint<br/>Code quality checks]:::build
+        UnitTests[npm run test<br/>59 unit tests]:::build
+        Coverage[Coverage Report<br/>Publish results]:::build
+        CDKSynth[CDK Synth<br/>Generate CloudFormation]:::build
+    end
+
+    %% Security & Docker
+    subgraph Parallel[Parallel Execution]
+        DockerBuild[Build Docker Images<br/>Backend + Frontend]:::build
+        NPMAudit[NPM Audit<br/>Dependencies]:::security
+        CDKNAG[CDK NAG<br/>Infrastructure rules]:::security
+    end
+
+    %% Dev Deployment
+    subgraph DevDeploy[Dev Environment Deploy]
+        DeployStacks[Deploy Stacks<br/>Network → DB → Messaging → App]:::deploy
+        VerifyHealth[Verify Deployment<br/>ECS health + ALB endpoint]:::deploy
+    end
+
+    %% Completion
+    Success([Deployment Complete]):::success
+    Failed([Failed]):::security
+
+    %% Flow
+    GitPush --> BranchCheck
+    BranchCheck -->|develop| BuildTest
+    BranchCheck -->|other| Failed
+
+    Install --> Lint --> UnitTests --> Coverage --> CDKSynth
+    CDKSynth --> Parallel
+
+    DockerBuild & NPMAudit & CDKNAG --> SecurityGate{All Pass?}:::security
+    SecurityGate -->|Yes| DevDeploy
+    SecurityGate -->|No| Failed
+
+    DeployStacks --> VerifyHealth --> Success
+
+    style BuildTest fill:#E8F4F8,stroke:#00A4BD,stroke-width:2px
+    style Parallel fill:#FFE5E5,stroke:#D13212,stroke-width:2px
+    style DevDeploy fill:#FFF3E0,stroke:#FF9900,stroke-width:2px
+```
+
 ### Pipeline Jobs
 
 **1. build-and-test** (Always runs)
