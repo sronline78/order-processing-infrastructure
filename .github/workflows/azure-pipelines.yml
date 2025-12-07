@@ -19,7 +19,7 @@ pr:
       - develop
 
 variables:
-  - group: aws-credentials  # Variable group containing AWS credentials
+  - group: aws-creds  # Variable group containing AWS credentials
   - name: NODE_VERSION
     value: '18.x'
   - name: CDK_DEFAULT_REGION
@@ -155,7 +155,7 @@ stages:
         displayName: 'Deploy Dev Infrastructure'
         pool:
           vmImage: 'ubuntu-latest'
-        environment: 'dev'
+        environment: 'development'
         strategy:
           runOnce:
             deploy:
