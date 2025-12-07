@@ -109,6 +109,7 @@ stages:
       # Build Docker images for backend and frontend (optional - can also build during deployment)
       - job: Docker_Build
         displayName: 'Build Docker Images'
+        dependsOn: CDK_Build_Test  # Run sequentially to avoid parallelism limits
         pool:
           vmImage: 'ubuntu-latest'
         steps:
@@ -356,7 +357,7 @@ stages:
   #############################################################################
   - stage: Security_Scan
     displayName: 'Security Scanning'
-    dependsOn: []  # Run in parallel with Build_And_Test
+    dependsOn: Build_And_Test  # Run sequentially to avoid parallelism limits
     condition: succeeded()
     jobs:
       - job: npm_audit
@@ -377,6 +378,7 @@ stages:
 
       - job: cdk_nag
         displayName: 'CDK NAG Security Checks'
+        dependsOn: npm_audit  # Run sequentially to avoid parallelism limits
         pool:
           vmImage: 'ubuntu-latest'
         steps:
