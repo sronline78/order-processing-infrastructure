@@ -1,6 +1,28 @@
 # Observability & Security Plan
 
-*Brief plan addressing monitoring/logging of key components (RDS, ECS, ALB) and security risk mitigations.*
+## Table of Contents
+- [Introduction](#introduction)
+- [Monitoring & Logging (Current Implementation)](#monitoring--logging-current-implementation)
+  - [Application Load Balancer](#application-load-balancer)
+  - [ECS Fargate Services](#ecs-fargate-services)
+  - [Aurora Serverless v2 (RDS)](#aurora-serverless-v2-rds)
+  - [Additional Components](#additional-components)
+- [Security Controls (Current Implementation)](#security-controls-current-implementation)
+  - [Network Security](#network-security)
+  - [Data Protection](#data-protection)
+  - [Access Control](#access-control)
+  - [Application Security](#application-security)
+- [Security Risks & Mitigations](#security-risks--mitigations)
+- [Production Requirements](#production-requirements)
+- [References](#references)
+
+## Introduction
+
+This plan addresses Part 3 of the infrastructure assessment: monitoring and logging of key components (RDS, ECS, ALB), and identification of security risks with proposed mitigations.
+
+**Current State**: The deployment implements foundational observability and security controls including CloudWatch logging for all services, VPC Flow Logs, network segmentation, encryption at rest and in transit, IAM least privilege, and WAF rate limiting.
+
+**Production Readiness**: To meet production security standards, five AWS security services are ready to enable via simple configuration flags. These services provide threat detection, compliance monitoring, vulnerability scanning, audit trails, and configuration tracking at an estimated cost of $10-20/month (dev) or $25-40/month (production).
 
 ## Monitoring & Logging (Current Implementation)
 
@@ -59,7 +81,7 @@
 
 **Mitigation**: Enable CloudTrail by setting `enableCloudTrail: true` in `lib/config/environment-config.ts`. CloudTrail logs all API calls to S3 with encryption and log file validation.
 
-**Cost**: ~$2-5/month
+**Cost**: First trail free (management events), S3 storage ~$1-2/month
 
 ### 2. No Threat Detection
 **Risk**: Malicious activity (compromised credentials, crypto mining, data exfiltration, port scanning) goes undetected.
@@ -68,28 +90,28 @@
 
 **Impact**: Reduces time-to-detect from months to hours.
 
-**Cost**: ~$30-50/month
+**Cost**: ~$3-8/month (based on CloudTrail events and VPC Flow Logs volume)
 
 ### 3. No Compliance Monitoring
 **Risk**: Security misconfigurations (public S3 buckets, overly permissive security groups, unencrypted resources) are not automatically detected.
 
 **Mitigation**: Enable Security Hub (`enableSecurityHub: true`) with AWS Foundational Security Best Practices standard. Review weekly, remediate HIGH within 7 days.
 
-**Cost**: ~$10-15/month
+**Cost**: ~$1-3/month (based on number of security checks)
 
 ### 4. No Container Vulnerability Scanning
 **Risk**: Container images may contain known CVEs in OS packages or application dependencies.
 
 **Mitigation**: Enable Inspector v2 (`enableInspector: true`) for continuous ECR image scanning. Configure CI/CD to block deployment of images with CRITICAL CVEs.
 
-**Cost**: ~$10-15/month
+**Cost**: ~$1-2/month (2 images × ~150 rescans/month at $0.09 per rescan = ~$1.35)
 
 ### 5. No Configuration Change Tracking
 **Risk**: Cannot answer "who changed the security group rules last Tuesday?" or prove compliance state at a specific point in time.
 
 **Mitigation**: Enable AWS Config (`enableConfig: true`) to track resource configuration history. Create Config rules for tagging, encryption, and security group compliance.
 
-**Cost**: ~$10-15/month
+**Cost**: ~$2-4/month (based on ~30 resources tracked)
 
 ### 6. Limited Observability for Troubleshooting
 **Risk**: When requests fail or slow down, must manually correlate logs across ALB, ECS, and Aurora. Cannot visualize request flow or identify bottlenecks.
@@ -99,7 +121,7 @@
 - Enable RDS Performance Insights (query-level analysis, wait events, top SQL)
 - Configure CloudWatch Alarms for critical thresholds (unhealthy hosts, high CPU, database connections)
 
-**Cost**: ~$5-10/month (X-Ray dev), free (Performance Insights 7-day retention)
+**Cost**: ~$1-2/month (X-Ray dev), free (Performance Insights 7-day retention)
 
 ### 7. No Cost Monitoring
 **Risk**: Unexpected cost spikes from misconfiguration or compromised accounts go undetected until monthly bill.
@@ -142,7 +164,7 @@ securityConfig: {
 }
 ```
 
-**Total Additional Cost**: ~$65-100/month (production environment)
+**Total Additional Cost**: ~$10-20/month for all security services (dev environment), ~$25-40/month (production with higher volume)
 
 **Additional Recommendations**:
 1. Create CloudWatch Alarms for ALB, ECS, Aurora, and SQS (WAF alarms already exist in waf-stack.ts)
