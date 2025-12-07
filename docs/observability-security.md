@@ -145,7 +145,7 @@ securityConfig: {
 **Total Additional Cost**: ~$65-100/month (production environment)
 
 **Additional Recommendations**:
-1. Create monitoring stack with CloudWatch Alarms (alarms exist in code, stack needs creation)
+1. Create CloudWatch Alarms for ALB, ECS, Aurora, and SQS (WAF alarms already exist in waf-stack.ts)
 2. Enable AWS X-Ray distributed tracing
 3. Enable RDS Performance Insights (free for 7-day retention)
 4. Configure HTTPS with ACM certificate
