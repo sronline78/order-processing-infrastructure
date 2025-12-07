@@ -91,7 +91,7 @@ describe('ApplicationStack', () => {
         Port: 3000,
         Protocol: 'HTTP',
         TargetType: 'ip',
-        HealthCheckPath: '/health',
+        HealthCheckPath: '/api/health',
       });
     });
 
