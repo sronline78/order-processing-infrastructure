@@ -22,7 +22,7 @@ This plan addresses Part 3 of the infrastructure assessment: monitoring and logg
 
 **Current State**: The deployment implements foundational observability and security controls including CloudWatch logging for all services, VPC Flow Logs, network segmentation, encryption at rest and in transit, IAM least privilege, and WAF rate limiting.
 
-**Production Readiness**: To meet production security standards, five AWS security services are ready to enable via simple configuration flags. These services provide threat detection, compliance monitoring, vulnerability scanning, audit trails, and configuration tracking at an estimated cost of $10-20/month (dev) or $25-40/month (production).
+**Production Readiness**: To meet production security standards, five additional AWS security services are recommended. These services provide threat detection, compliance monitoring, vulnerability scanning, audit trails, and configuration tracking at an estimated cost of $10-20/month (dev) or $25-40/month (production).
 
 ## Monitoring & Logging (Current Implementation)
 
@@ -152,19 +152,28 @@ Send alerts to SNS topics for email/Slack integration.
 
 ## Production Requirements
 
-To make this deployment production-ready, enable the following in `lib/config/environment-config.ts`:
+**IMPORTANT:** The security configuration flags exist in `lib/config/environment-config.ts`, but the CDK implementation stacks do not exist yet. Enabling these flags will have no effect until a `security-stack.ts` is created that reads these configuration values and provisions the corresponding AWS resources.
+
+**Current Status:** Configuration structure ready, implementation pending.
+
+To make this deployment production-ready, the following security services need CDK implementation:
 
 ```typescript
 securityConfig: {
-  enableCloudTrail: true,    // Audit trail (compliance requirement)
-  enableGuardDuty: true,     // Threat detection (security requirement)
-  enableSecurityHub: true,   // Compliance scanning (audit requirement)
-  enableInspector: true,     // Vulnerability scanning (security requirement)
-  enableConfig: true,        // Configuration tracking (compliance requirement)
+  enableCloudTrail: true,    // Audit trail (compliance requirement) - NOT IMPLEMENTED
+  enableGuardDuty: true,     // Threat detection (security requirement) - NOT IMPLEMENTED
+  enableSecurityHub: true,   // Compliance scanning (audit requirement) - NOT IMPLEMENTED
+  enableInspector: true,     // Vulnerability scanning (security requirement) - NOT IMPLEMENTED
+  enableConfig: true,        // Configuration tracking (compliance requirement) - NOT IMPLEMENTED
 }
 ```
 
-**Total Additional Cost**: ~$10-20/month for all security services (dev environment), ~$25-40/month (production with higher volume)
+**Implementation Required:**
+1. Create `lib/stacks/security-stack.ts`
+2. Conditionally create resources based on `securityConfig` flags
+3. Instantiate SecurityStack in `bin/order-processing-infrastructure.ts`
+
+**Total Additional Cost** (once implemented): ~$10-20/month for all security services (dev environment), ~$25-40/month (production with higher volume)
 
 **Additional Recommendations**:
 1. Create CloudWatch Alarms for ALB, ECS, Aurora, and SQS (WAF alarms already exist in waf-stack.ts)
